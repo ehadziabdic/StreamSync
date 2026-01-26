@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Redirecting to Stremio...</title>
+    <script>
+        // Fetch the current URL from a JSON file
+        fetch('current-url.json')
+            .then(response => response.json())
+            .then(data => {
+                window.location.href = data.url;
+            });
+    </script>
+</head>
+<body>
+    <p>Redirecting to Stremio...</p>
+</body>
+</html>
