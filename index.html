@@ -2,16 +2,24 @@
 <html>
 <head>
     <title>Redirecting to Stremio...</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial; text-align: center; padding: 50px; }
+    </style>
     <script>
-        // Fetch the current URL from a JSON file
         fetch('current-url.json')
             .then(response => response.json())
             .then(data => {
+                document.getElementById('status').innerText = 'Redirecting to ' + data.url;
                 window.location.href = data.url;
+            })
+            .catch(error => {
+                document.getElementById('status').innerText = 'Error loading URL. Please contact admin.';
             });
     </script>
 </head>
 <body>
-    <p>Redirecting to Stremio...</p>
+    <h2>Redirecting to Stremio...</h2>
+    <p id="status">Loading...</p>
 </body>
 </html>
