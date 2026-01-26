@@ -15,14 +15,14 @@
             color: #fff;
         }
         .loading { color: #4CAF50; }
+        .error { color: #f44336; }
     </style>
     <script>
-        // Bypass ALL caching
-        fetch('current-url.json?cachebust=' + new Date().getTime(), {
-            cache: 'no-store',
-            headers: {
-                'Cache-Control': 'no-cache'
-            }
+        // Fetch from Gist (updates much faster!)
+        const GIST_URL = 'https://gist.githubusercontent.com/ehadziabdic/2e820abcd242521decd9fddf5421661a/raw/stremio-url.json';
+        
+        fetch(GIST_URL + '?t=' + Date.now(), {
+            cache: 'no-store'
         })
         .then(response => response.json())
         .then(data => {
@@ -33,6 +33,7 @@
             }, 500);
         })
         .catch(error => {
+            document.getElementById('status').className = 'error';
             document.getElementById('status').innerText = 'Error: ' + error.message;
             console.error('Error:', error);
         });
@@ -41,9 +42,6 @@
 <body>
     <h2>🎬 Stremio Redirect</h2>
     <p id="status" class="loading">Loading latest URL...</p>
-    <p style="font-size: 12px; color: #888;">Updated: <span id="time"></span></p>
-    <script>
-        document.getElementById('time').innerText = new Date().toLocaleString();
-    </script>
+    <p style="font-size: 12px; color: #888;">Powered by GitHub Gist</p>
 </body>
 </html>
