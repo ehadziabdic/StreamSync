@@ -3,23 +3,47 @@
 <head>
     <title>Redirecting to Stremio...</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <style>
-        body { font-family: Arial; text-align: center; padding: 50px; }
+        body { 
+            font-family: Arial; 
+            text-align: center; 
+            padding: 50px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .loading { color: #4CAF50; }
     </style>
     <script>
-        fetch('current-url.json')
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('status').innerText = 'Redirecting to ' + data.url;
+        // Bypass ALL caching
+        fetch('current-url.json?cachebust=' + new Date().getTime(), {
+            cache: 'no-store',
+            headers: {
+                'Cache-Control': 'no-cache'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('status').innerText = 'Redirecting to ' + data.url;
+            console.log('Redirecting to:', data.url);
+            setTimeout(() => {
                 window.location.href = data.url;
-            })
-            .catch(error => {
-                document.getElementById('status').innerText = 'Error loading URL. Please contact admin.';
-            });
+            }, 500);
+        })
+        .catch(error => {
+            document.getElementById('status').innerText = 'Error: ' + error.message;
+            console.error('Error:', error);
+        });
     </script>
 </head>
 <body>
-    <h2>Redirecting to Stremio...</h2>
-    <p id="status">Loading...</p>
+    <h2>🎬 Stremio Redirect</h2>
+    <p id="status" class="loading">Loading latest URL...</p>
+    <p style="font-size: 12px; color: #888;">Updated: <span id="time"></span></p>
+    <script>
+        document.getElementById('time').innerText = new Date().toLocaleString();
+    </script>
 </body>
 </html>
