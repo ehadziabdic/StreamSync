@@ -82,7 +82,7 @@ def loadShows(access_token):
         "Authorization": f"Bearer {access_token}"
     }
     today = datetime.now().strftime("%Y-%m-%d")
-    url = f"{API_URL}/calendars/my/shows/{today}/60"
+    url = f"{API_URL}/calendars/my/shows/{today}/90"
     
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
@@ -107,7 +107,7 @@ def main():
     
     # 2. Build Calendar
     cal = Calendar()
-    cal.add('x-wr-calname', 'My Trakt Schedule')
+    cal.add('x-wr-calname', 'Trakt Calendar')
     for ev in loadShows(access_token):
         event = Event()
         event.add('summary', ev['summary'])
