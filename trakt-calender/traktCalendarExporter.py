@@ -32,19 +32,28 @@ def update_gist_files(ics_content, new_tokens):
     url = f"https://api.github.com/gists/{GIST_ID}"
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": "application/vnd.github+json"
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
     }
-    data = {
+    # We must format the files object correctly for the PATCH request
+    payload = {
+        "description": "Updated Trakt Calendar and Tokens",
         "files": {
             "trakt.ics": {"content": ics_content},
-            "token.json": {"content": json.dumps(new_tokens)}
+            "token.json": {"content": json.dumps(new_tokens, indent=2)}
         }
     }
-    r = requests.patch(url, headers=headers, json=data)
+    
+    print(f"Attempting to update Gist: {GIST_ID}...")
+    r = requests.patch(url, headers=headers, json=payload)
+    
     if r.status_code == 200:
-        print("Successfully updated Gist with new Calendar and Token.")
+        print("✅ SUCCESS: Gist updated.")
     else:
-        print(f"Failed to update Gist: {r.text}")
+        print(f"❌ FAILED: {r.status_code}")
+        print(f"Response: {r.text}")
+        # This will make the GitHub Action fail so you can see why in the logs
+        exit(1)
 
 # --- 3. TRAKT API LOGIC ---
 def get_access_token():
