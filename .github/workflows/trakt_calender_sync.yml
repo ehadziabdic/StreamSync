@@ -1,6 +1,8 @@
 name: Update Trakt Calendar
 
 on:
+  push:
+    branches: [ main ]
   schedule:
     - cron: '0 0 * * *' # Runs automatically every day at midnight
   workflow_dispatch:    # Allows you to click "Run workflow" manually
@@ -24,7 +26,7 @@ jobs:
         run: pip install requests pytz icalendar python-dateutil
 
       - name: Run exporter
-        working-directory: ./trakt-calendar
+        working-directory: ./trakt-calender
         env:
           TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
@@ -35,6 +37,7 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add trakt.ics
+          # Look for the file inside the subfolder
+          git add trakt-calender/trakt.ics 
           git commit -m "Update Trakt calendar data" || exit 0
           git push
