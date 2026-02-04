@@ -7,102 +7,109 @@ from dateutil.relativedelta import relativedelta
 from pytz import utc
 from icalendar import Calendar, Event
 
-# --- 1. SETTINGS FROM GITHUB SECRETS ---
-# These must match the names you saved in Settings > Secrets > Actions
+# --- 1. SETTINGS ---
 CLIENT_ID = os.environ.get('TRAKT_CLIENT_ID')
 CLIENT_SECRET = os.environ.get('TRAKT_CLIENT_SECRET')
-REFRESH_TOKEN = os.environ.get('TRAKT_REFRESH_TOKEN')
-
+GIST_ID = os.environ.get('GIST_ID')
+GH_TOKEN = os.environ.get('GH_PAT_TOKEN')
 API_URL = "https://api.trakt.tv"
-OUTPUT_FILE = "trakt.ics"
 
-# --- 2. DATA HELPER ---
-class EpisodeEvent(object):
-    def __init__(self, show, title, season, number, runtime, airtime):
-        self.show = show
-        self.title = title
-        self.season = str(season).zfill(2)
-        self.number = str(number).zfill(2)
-        self.runtime = runtime
-        self.airtime = airtime
-        self.summary = f'{self.show} S{self.season}E{self.number} "{self.title}"'
+# --- 2. TOKEN PERSISTENCE LOGIC (GIST) ---
+def get_stored_tokens():
+    """Fetches tokens from the Gist. If not found, falls back to GitHub Secrets."""
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {"Authorization": f"Bearer {GH_TOKEN}"}
+    resp = requests.get(url, headers=headers).json()
+    
+    if 'token.json' in resp.get('files', {}):
+        return json.loads(resp['files']['token.json']['content'])
+    
+    # Fallback for the very first run
+    return {"refresh_token": os.environ.get('TRAKT_REFRESH_TOKEN')}
+
+def update_gist_files(ics_content, new_tokens):
+    """Saves both the new calendar and the new refresh token to the Gist."""
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+    data = {
+        "files": {
+            "trakt.ics": {"content": ics_content},
+            "token.json": {"content": json.dumps(new_tokens)}
+        }
+    }
+    r = requests.patch(url, headers=headers, json=data)
+    if r.status_code == 200:
+        print("Successfully updated Gist with new Calendar and Token.")
+    else:
+        print(f"Failed to update Gist: {r.text}")
 
 # --- 3. TRAKT API LOGIC ---
 def get_access_token():
-    """Uses the Refresh Token to get a fresh Access Token for this run."""
+    tokens = get_stored_tokens()
     url = f"{API_URL}/oauth/token"
     data = {
-        "refresh_token": REFRESH_TOKEN,
+        "refresh_token": tokens['refresh_token'],
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
         "grant_type": "refresh_token"
     }
     response = requests.post(url, json=data)
-    response_data = response.json()
+    res_data = response.json()
     
-    if 'access_token' not in response_data:
-        raise Exception(f"Failed to refresh token: {response_data}")
+    if 'access_token' not in res_data:
+        raise Exception(f"Trakt Refresh Failed: {res_data}")
         
-    return response_data['access_token']
+    return res_data['access_token'], res_data
 
-def loadShows():
-    """Fetches your personal 60-day calendar from Trakt."""
-    token = get_access_token()
+def loadShows(access_token):
     headers = {
         "Content-Type": "application/json",
         "trakt-api-version": "2",
         "trakt-api-key": CLIENT_ID,
-        "Authorization": f"Bearer {token}"
+        "Authorization": f"Bearer {access_token}"
     }
-    
     today = datetime.now().strftime("%Y-%m-%d")
-    # Fetching 60 days of YOUR shows
     url = f"{API_URL}/calendars/my/shows/{today}/60"
     
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
-        print(f"Trakt API Error: {response.status_code}")
-        return
+        return []
 
+    events = []
     for entry in response.json():
         ep = entry['episode']
         sh = entry['show']
-        # Parse ISO timestamp to UTC
         airtime = datetime.strptime(entry['first_aired'][:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=utc)
-        
-        yield EpisodeEvent(
-            sh['title'], 
-            ep['title'], 
-            ep['season'], 
-            ep['number'], 
-            sh.get('runtime', 30), 
-            airtime
-        )
+        events.append({
+            "summary": f"{sh['title']} S{str(ep['season']).zfill(2)}E{str(ep['number']).zfill(2)} \"{ep['title']}\"",
+            "start": airtime,
+            "end": airtime + relativedelta(minutes=sh.get('runtime', 30))
+        })
+    return events
 
-# --- 4. CALENDAR GENERATION ---
-def createCalendar():
+# --- 4. RUN ---
+def main():
+    # 1. Get tokens & Refresh
+    access_token, new_tokens = get_access_token()
+    
+    # 2. Build Calendar
     cal = Calendar()
-    cal.add('prodid', '-//Trakt Personal Calendar//')
-    cal.add('version', '2.0')
     cal.add('x-wr-calname', 'My Trakt Schedule')
-
-    count = 0
-    for ev in loadShows():
+    for ev in loadShows(access_token):
         event = Event()
-        event.add('summary', ev.summary)
-        event.add('dtstart', ev.airtime)
-        event.add('dtend', ev.airtime + relativedelta(minutes=ev.runtime))
+        event.add('summary', ev['summary'])
+        event.add('dtstart', ev['start'])
+        event.add('dtend', ev['end'])
         event.add('dtstamp', datetime.now(utc))
         event.add('uid', f"{uuid4()}@trakt")
-        
         cal.add_component(event)
-        count += 1
     
-    with open(OUTPUT_FILE, 'wb') as f:
-        f.write(cal.to_ical())
-    
-    print(f"Successfully generated {OUTPUT_FILE} with {count} episodes.")
+    # 3. Save everything to Gist in one go
+    update_gist_files(cal.to_ical().decode('utf-8'), new_tokens)
 
 if __name__ == "__main__":
-    createCalendar()
+    main()
