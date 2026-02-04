@@ -33,11 +33,17 @@ jobs:
           TRAKT_REFRESH_TOKEN: ${{ secrets.TRAKT_REFRESH_TOKEN }}
         run: python traktCalendarExporter.py
 
-      - name: Commit and push if changed
+      - name: Update Gist
+        env:
+          GIST_ID: 1a6b5f08c59721e6d11f2d3f43cba970 # <--- Paste your Gist ID code here
+          GH_TOKEN: ${{ secrets.GH_PAT_TOKEN }} # <--- Ensure you have a Secret with your Token
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          # Look for the file inside the subfolder
-          git add trakt-calender/trakt.ics 
-          git commit -m "Update Trakt calendar data" || exit 0
-          git push
+          # Read the file content and escape it for JSON
+          CONTENT=$(cat trakt-calender/trakt.ics | jq -Rs .)
+          
+          # Send to Gist via API
+          curl -L -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -d "{\"files\":{\"trakt.ics\":{\"content\":$CONTENT}}}" \
+            "https://api.github.com/gists/$GIST_ID"
