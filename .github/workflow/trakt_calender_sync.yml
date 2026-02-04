@@ -24,6 +24,7 @@ jobs:
         run: pip install requests pytz icalendar python-dateutil
 
       - name: Run exporter
+        working-directory: ./trakt-calendar
         env:
           TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
