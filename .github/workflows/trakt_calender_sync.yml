@@ -16,7 +16,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests pytz icalendar python-dateutil
+        run: pip install requests pytz icalendar python-dateutil typing_extensions
 
       - name: Run exporter
         working-directory: ./trakt-calender
