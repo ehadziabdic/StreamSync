@@ -19,6 +19,16 @@ def parse_trakt_datetime(value):
         return datetime.strptime(value[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=utc)
     return datetime.strptime(value[:10], '%Y-%m-%d').replace(tzinfo=utc)
 
+
+def normalize_runtime(runtime, default_minutes):
+    try:
+        normalized = int(runtime)
+        if normalized <= 0:
+            return default_minutes
+        return normalized
+    except (TypeError, ValueError):
+        return default_minutes
+
 # --- 2. TOKEN PERSISTENCE LOGIC (GIST) ---
 def get_stored_tokens():
     """Fetches tokens from the Gist. If not found, falls back to GitHub Secrets."""
@@ -98,10 +108,11 @@ def loadShows(access_token):
         ep = entry['episode']
         sh = entry['show']
         airtime = parse_trakt_datetime(entry['first_aired'])
+        runtime = normalize_runtime(sh.get('runtime'), 30)
         events.append({
             "summary": f"{sh['title']} S{str(ep['season']).zfill(2)}E{str(ep['number']).zfill(2)} \"{ep['title']}\"",
             "start": airtime,
-            "end": airtime + relativedelta(minutes=sh.get('runtime', 30))
+            "end": airtime + relativedelta(minutes=runtime)
         })
     return events
 
@@ -125,7 +136,7 @@ def loadMovies(access_token):
         release_time = parse_trakt_datetime(entry['released'])
         title = movie['title']
         year = movie.get('year')
-        runtime = movie.get('runtime', 120)
+        runtime = normalize_runtime(movie.get('runtime'), 120)
 
         summary = f"{title} ({year})" if year else title
         events.append({
