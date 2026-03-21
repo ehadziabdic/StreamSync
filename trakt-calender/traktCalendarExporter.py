@@ -82,7 +82,7 @@ def loadShows(access_token):
         "Authorization": f"Bearer {access_token}"
     }
     today = datetime.now().strftime("%Y-%m-%d")
-    url = f"{API_URL}/calendars/my/shows/{today}/120"
+    url = f"{API_URL}/calendars/my/shows/{today}/360"
     
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
