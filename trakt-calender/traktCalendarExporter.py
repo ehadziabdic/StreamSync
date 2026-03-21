@@ -14,6 +14,11 @@ GIST_ID = os.environ.get('GIST_ID')
 GH_TOKEN = os.environ.get('GH_PAT_TOKEN')
 API_URL = "https://api.trakt.tv"
 
+def parse_trakt_datetime(value):
+    if "T" in value:
+        return datetime.strptime(value[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=utc)
+    return datetime.strptime(value[:10], '%Y-%m-%d').replace(tzinfo=utc)
+
 # --- 2. TOKEN PERSISTENCE LOGIC (GIST) ---
 def get_stored_tokens():
     """Fetches tokens from the Gist. If not found, falls back to GitHub Secrets."""
@@ -92,11 +97,41 @@ def loadShows(access_token):
     for entry in response.json():
         ep = entry['episode']
         sh = entry['show']
-        airtime = datetime.strptime(entry['first_aired'][:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=utc)
+        airtime = parse_trakt_datetime(entry['first_aired'])
         events.append({
             "summary": f"{sh['title']} S{str(ep['season']).zfill(2)}E{str(ep['number']).zfill(2)} \"{ep['title']}\"",
             "start": airtime,
             "end": airtime + relativedelta(minutes=sh.get('runtime', 30))
+        })
+    return events
+
+def loadMovies(access_token):
+    headers = {
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": CLIENT_ID,
+        "Authorization": f"Bearer {access_token}"
+    }
+    today = datetime.now().strftime("%Y-%m-%d")
+    url = f"{API_URL}/calendars/my/movies/{today}/360"
+
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        return []
+
+    events = []
+    for entry in response.json():
+        movie = entry['movie']
+        release_time = parse_trakt_datetime(entry['released'])
+        title = movie['title']
+        year = movie.get('year')
+        runtime = movie.get('runtime', 120)
+
+        summary = f"{title} ({year})" if year else title
+        events.append({
+            "summary": summary,
+            "start": release_time,
+            "end": release_time + relativedelta(minutes=runtime)
         })
     return events
 
@@ -108,7 +143,8 @@ def main():
     # 2. Build Calendar
     cal = Calendar()
     cal.add('x-wr-calname', 'Trakt Calendar')
-    for ev in loadShows(access_token):
+    all_events = loadShows(access_token) + loadMovies(access_token)
+    for ev in all_events:
         event = Event()
         event.add('summary', ev['summary'])
         event.add('dtstart', ev['start'])
