@@ -21,11 +21,9 @@ def safe_int(val, default=1):
 
 
 def fetch_json(url, headers=None):
-    """Now logs WHY a fetch failed instead of silently returning None."""
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/4.2"
-
+    headers["User-Agent"] = "SimklCalendarExporter/4.3"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
@@ -48,7 +46,6 @@ def extract_all_ids(obj):
     ids = set()
     if not isinstance(obj, dict):
         return ids
-
     targets = [obj, obj.get("show"), obj.get("anime"), obj.get("movie"), obj.get("ids")]
     for t in targets:
         if isinstance(t, dict):
@@ -64,13 +61,11 @@ def extract_all_ids(obj):
     return ids
 
 
-# category -> the key Simkl nests the media object under
 CATEGORY_KEY = {"shows": "show", "anime": "anime", "movies": "movie"}
+ALLOWED_STATUSES = {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold"}
 
 
 def get_user_watchlist():
-    """Fetch active watchlist items, kept SEPARATE per category so an anime
-    title/id can never accidentally match a show/movie calendar entry."""
     headers = {
         "Authorization": f"Bearer {SIMKL_ACCESS_TOKEN}",
         "simkl-api-key": SIMKL_CLIENT_ID,
@@ -79,22 +74,17 @@ def get_user_watchlist():
     user_ids = {"shows": set(), "anime": set(), "movies": set()}
     user_titles = {"shows": set(), "anime": set(), "movies": set()}
     direct_events = []
-
-    ALLOWED_STATUSES = {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold"}
+    watchlist_movies = []  # [{"simkl_id": ..., "title": ...}, ...]
 
     for category in ["shows", "anime", "movies"]:
         url = f"https://api.simkl.com/sync/all-items/{category}?next_watch_info=yes"
         print(f"[*] Fetching watchlist for: {category}...")
         data = fetch_json(url, headers=dict(headers))
-
         if not data:
-            print(f"    [!] No data returned for {category} watchlist - check token/scopes.")
+            print(f"    [!] No data returned for {category} watchlist.")
             continue
 
         items = data.get(category, []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-        print(f"    [debug] raw item count for {category}: {len(items)}")
-        if items:
-            print(f"    [debug] sample keys: {list(items[0].keys())}")
 
         active_count = 0
         for item in items:
@@ -106,11 +96,20 @@ def get_user_watchlist():
             nested_key = CATEGORY_KEY[category]
             show_obj = item.get(nested_key) or item.get("show") or item.get("anime") or item.get("movie") or item
 
-            user_ids[category].update(extract_all_ids(show_obj))
+            item_ids = extract_all_ids(show_obj)
+            user_ids[category].update(item_ids)
             raw_title = show_obj.get("title", "")
             cleaned = clean_string(raw_title)
             if cleaned:
                 user_titles[category].add(cleaned)
+
+            if category == "movies":
+                ids_dict = show_obj.get("ids") if isinstance(show_obj.get("ids"), dict) else {}
+                simkl_id = ids_dict.get("simkl") or ids_dict.get("simkl_id")
+                if simkl_id:
+                    watchlist_movies.append({"simkl_id": str(simkl_id), "title": raw_title or "Movie"})
+                else:
+                    print(f"    [!] No simkl id found for movie '{raw_title}', can't look up release date.")
 
             next_info = item.get("next_to_watch_info")
             if next_info and isinstance(next_info, dict):
@@ -127,15 +126,13 @@ def get_user_watchlist():
                         }
                     )
 
-        print(f"    Found {active_count} active items in {category}. "
-              f"({len(user_ids[category])} ids, {len(user_titles[category])} titles indexed)")
+        print(f"    Found {active_count} active items in {category}.")
 
-    return user_ids, user_titles, direct_events
+    return user_ids, user_titles, direct_events, watchlist_movies
 
 
 def get_calendar_events(user_ids, user_titles):
-    """Scan calendar feeds. Each feed is matched ONLY against the watchlist
-    ids/titles for its own category (shows vs anime vs movies)."""
+    """Shows + anime only now - these feeds are confirmed working."""
     now = datetime.utcnow()
     current_year = now.year
     current_month = now.month
@@ -144,13 +141,10 @@ def get_calendar_events(user_ids, user_titles):
     calendar_urls = [
         ("https://data.simkl.in/calendar/tv.json", "shows"),
         ("https://data.simkl.in/calendar/anime.json", "anime"),
-        ("https://data.simkl.in/calendar/movies.json", "movies"),
         (f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json", "shows"),
         (f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json", "anime"),
-        (f"https://data.simkl.in/calendar/{current_year}/{current_month}/movies.json", "movies"),
         (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json", "shows"),
         (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json", "anime"),
-        (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/movies.json", "movies"),
     ]
 
     matched_events = []
@@ -159,12 +153,8 @@ def get_calendar_events(user_ids, user_titles):
         print(f"[*] Scanning feed: {url}...")
         feed = fetch_json(url)
         if not feed or not isinstance(feed, list):
-            print(f"    [!] Feed returned nothing usable - see error above (or empty list).")
+            print("    [!] Feed returned nothing usable.")
             continue
-
-        print(f"    [debug] feed has {len(feed)} entries")
-        if feed:
-            print(f"    [debug] sample entry keys: {list(feed[0].keys())}")
 
         nested_key = CATEGORY_KEY[category]
         cat_ids = user_ids[category]
@@ -173,7 +163,6 @@ def get_calendar_events(user_ids, user_titles):
         feed_matches = 0
         for entry in feed:
             entry_ids = extract_all_ids(entry)
-
             nested_obj = entry.get(nested_key)
             if not isinstance(nested_obj, dict):
                 nested_obj = entry.get("show") if isinstance(entry.get("show"), dict) else {}
@@ -182,7 +171,6 @@ def get_calendar_events(user_ids, user_titles):
                 entry.get(f"{nested_key}_title")
                 or entry.get("show_title")
                 or entry.get("anime_title")
-                or entry.get("movie_title")
                 or nested_obj.get("title")
                 or entry.get("title", "")
             )
@@ -196,8 +184,8 @@ def get_calendar_events(user_ids, user_titles):
                 matched_events.append(
                     {
                         "title": entry_title or "Title",
-                        "season": safe_int(entry.get("season") or nested_obj.get("season"), 1) if category != "movies" else None,
-                        "episode": safe_int(entry.get("episode") or nested_obj.get("episode"), 1) if category != "movies" else None,
+                        "season": safe_int(entry.get("season") or nested_obj.get("season"), 1),
+                        "episode": safe_int(entry.get("episode") or nested_obj.get("episode"), 1),
                         "ep_title": entry.get("episode_title") or entry.get("title", ""),
                         "date": entry.get("date") or entry.get("air_date") or entry.get("release_date"),
                         "type": category,
@@ -207,6 +195,61 @@ def get_calendar_events(user_ids, user_titles):
         print(f"    Matched {feed_matches} entries.")
 
     return matched_events
+
+
+RELEASE_DATE_FIELDS = [
+    "release_date",
+    "theater_release_date",
+    "theater_date",
+    "us_release_date",
+    "digital_release_date",
+    "date",
+]
+
+
+def get_movie_events(watchlist_movies):
+    """Look up each plan-to-watch movie individually - no broken bulk feed needed."""
+    headers = {
+        "Authorization": f"Bearer {SIMKL_ACCESS_TOKEN}",
+        "simkl-api-key": SIMKL_CLIENT_ID,
+    }
+    events = []
+
+    for movie in watchlist_movies:
+        url = f"https://api.simkl.com/movies/{movie['simkl_id']}?extended=full"
+        print(f"[*] Looking up movie: {movie['title']} ({movie['simkl_id']})...")
+        data = fetch_json(url, headers=dict(headers))
+        if not isinstance(data, dict):
+            print("    [!] No data returned.")
+            continue
+
+        date_val = None
+        used_field = None
+        for field in RELEASE_DATE_FIELDS:
+            if data.get(field):
+                date_val = data[field]
+                used_field = field
+                break
+
+        if not date_val:
+            date_keys = [k for k in data.keys() if "date" in k.lower() or "release" in k.lower()]
+            print(f"    [!] No known release-date field populated. "
+                  f"Date-like keys in response: {date_keys or 'none'}")
+            continue
+
+        print(f"    [debug] using field '{used_field}' = {date_val}")
+        events.append(
+            {
+                "title": movie["title"],
+                "season": None,
+                "episode": None,
+                "ep_title": "",
+                "date": date_val,
+                "type": "movies",
+            }
+        )
+
+    return events
 
 
 def parse_iso_date(date_str):
@@ -289,7 +332,7 @@ def update_gist(ics_content):
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/4.2",
+        "User-Agent": "SimklCalendarExporter/4.3",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
@@ -321,10 +364,11 @@ def main():
         print(f"❌ ERROR: Missing required GitHub Secrets: {', '.join(missing)}")
         exit(1)
 
-    user_ids, user_titles, direct_events = get_user_watchlist()
+    user_ids, user_titles, direct_events, watchlist_movies = get_user_watchlist()
     calendar_events = get_calendar_events(user_ids, user_titles)
+    movie_events = get_movie_events(watchlist_movies)
 
-    all_events = direct_events + calendar_events
+    all_events = direct_events + calendar_events + movie_events
     ics_content, event_count = generate_ics(all_events)
 
     print(f"\n[+] Generated calendar with {event_count} active upcoming events.")
