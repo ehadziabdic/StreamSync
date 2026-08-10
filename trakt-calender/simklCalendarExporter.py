@@ -90,6 +90,10 @@ def get_user_watchlist():
     user_titles = {"shows": set(), "anime": set(), "movies": set()}
     direct_events = []
     watchlist_movies = []  # [{"simkl_id": ..., "title": ...}, ...]
+    # Per-item bookkeeping used only for the coverage diagnostic at the end -
+    # lets us report exactly why a tracked show/anime did or didn't produce
+    # a calendar entry, instead of just silently missing it.
+    watchlist_meta = {"shows": [], "anime": []}
 
     for category in ["shows", "anime", "movies"]:
         url = f"https://api.simkl.com/sync/all-items/{category}?next_watch_info=yes"
@@ -128,6 +132,7 @@ def get_user_watchlist():
                     print(f"    [!] No simkl id found for movie '{raw_title}', can't look up release date.")
 
             next_info = item.get("next_to_watch_info")
+            ep_date = None
             if next_info and isinstance(next_info, dict):
                 ep_date = next_info.get("date") or next_info.get("release_date")
                 if ep_date:
@@ -146,26 +151,38 @@ def get_user_watchlist():
                         }
                     )
 
+            if category in watchlist_meta:
+                watchlist_meta[category].append(
+                    {"title": raw_title or "Title", "ids": item_ids, "next_date": ep_date}
+                )
+
         print(f"    Found {active_count} active items in {category}.")
 
-    return user_ids, user_titles, direct_events, watchlist_movies
+    return user_ids, user_titles, direct_events, watchlist_movies, watchlist_meta
 
 
-def get_calendar_events(user_ids, user_titles):
-    """Shows + anime only now - these feeds are confirmed working."""
+def get_calendar_events(user_ids, user_titles, months_ahead=6):
+    """Shows + anime only now - these feeds are confirmed working.
+
+    months_ahead controls how many calendar months (including the current
+    one) get scanned. A show that premieres further out than this window
+    simply won't be found here - only in direct_events, if Simkl's watchlist
+    API has already populated a next-episode date for it."""
     now = datetime.utcnow()
-    current_year = now.year
-    current_month = now.month
-    next_month_dt = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
-
     calendar_urls = [
         ("https://data.simkl.in/calendar/tv.json", "shows"),
         ("https://data.simkl.in/calendar/anime.json", "anime"),
-        (f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json", "shows"),
-        (f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json", "anime"),
-        (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json", "shows"),
-        (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json", "anime"),
     ]
+
+    month_cursor = now.replace(day=1)
+    for _ in range(months_ahead):
+        calendar_urls.append(
+            (f"https://data.simkl.in/calendar/{month_cursor.year}/{month_cursor.month}/tv.json", "shows")
+        )
+        calendar_urls.append(
+            (f"https://data.simkl.in/calendar/{month_cursor.year}/{month_cursor.month}/anime.json", "anime")
+        )
+        month_cursor = (month_cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
 
     matched_events = []
 
@@ -404,6 +421,47 @@ def merge_duplicate_events(events):
     return merged
 
 
+def diagnose_missing(watchlist_meta, merged_events):
+    """Best-effort coverage report so 'why is X missing' has an actual answer
+    instead of a guess: for every tracked show/anime, say whether it produced
+    a future calendar entry, had a date that didn't survive (already past, or
+    unparsable), or has no next-episode date from Simkl at all."""
+    now_cutoff = datetime.utcnow() - timedelta(days=1)
+
+    event_entries = []
+    for ev in merged_events:
+        ids = ev.get("ids") or set()
+        d = parse_iso_date(ev.get("date"))
+        event_entries.append((ids, d))
+
+    missing_no_date = []
+    missing_had_date = []
+
+    for category in ["shows", "anime"]:
+        for item in watchlist_meta.get(category, []):
+            item_ids = item["ids"]
+            matches = [d for ids, d in event_entries if d and (ids & item_ids)]
+            future_matches = [d for d in matches if d >= now_cutoff]
+            if future_matches:
+                continue  # covered, nothing to report
+            if matches:
+                missing_had_date.append((item["title"], matches))
+            elif item.get("next_date"):
+                missing_had_date.append((item["title"], [f"raw='{item['next_date']}' (failed to parse/match)"]))
+            else:
+                missing_no_date.append(item["title"])
+
+    if missing_had_date:
+        print("\n[diag] Tracked items with a date that did NOT make it into the calendar:")
+        for title, dates in missing_had_date:
+            print(f"    [!] {title}: {dates}")
+
+    if missing_no_date:
+        print("\n[diag] Tracked items with NO next-episode date from Simkl yet (nothing we can do until Simkl publishes one):")
+        for title in missing_no_date:
+            print(f"    [-] {title}")
+
+
 def generate_ics(events):
     lines = [
         "BEGIN:VCALENDAR",
@@ -511,7 +569,7 @@ def main():
         print(f"❌ ERROR: Missing required GitHub Secrets: {', '.join(missing)}")
         exit(1)
 
-    user_ids, user_titles, direct_events, watchlist_movies = get_user_watchlist()
+    user_ids, user_titles, direct_events, watchlist_movies, watchlist_meta = get_user_watchlist()
     calendar_events = get_calendar_events(user_ids, user_titles)
     movie_events = get_movie_events(watchlist_movies)
 
@@ -525,6 +583,8 @@ def main():
 
     print(f"\n[+] Generated calendar with {event_count} active upcoming events.")
     update_gist(ics_content)
+
+    diagnose_missing(watchlist_meta, merged_events)
 
 
 if __name__ == "__main__":
