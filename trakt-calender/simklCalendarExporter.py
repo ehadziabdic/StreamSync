@@ -15,7 +15,6 @@ GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 
 
 def safe_int(val, default=1):
-    """Safely convert season/episode values to integers."""
     if isinstance(val, dict):
         val = val.get("number") or val.get("season") or val.get("episode")
     try:
@@ -27,7 +26,7 @@ def safe_int(val, default=1):
 def fetch_json(url, headers=None):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/4.1"
+    headers["User-Agent"] = "SimklCalendarExporter/4.2"
 
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -38,14 +37,12 @@ def fetch_json(url, headers=None):
 
 
 def clean_string(text):
-    """Normalize text for exact title matching and dedup keys."""
     if not text:
         return ""
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
 def extract_all_ids(obj):
-    """Extract all valid Simkl, TVDB, IMDb, and TMDB IDs."""
     ids = set()
     if not isinstance(obj, dict):
         return ids
@@ -73,7 +70,6 @@ def extract_all_ids(obj):
 
 
 def get_user_watchlist():
-    """Fetch active watchlist items (watching / plantowatch only)."""
     headers = {
         "Authorization": f"Bearer {SIMKL_ACCESS_TOKEN}",
         "simkl-api-key": SIMKL_CLIENT_ID,
@@ -93,44 +89,70 @@ def get_user_watchlist():
         if not data:
             continue
 
-        items = (
-            data.get(category, [])
-            if isinstance(data, dict)
-            else (data if isinstance(data, list) else [])
-        )
+        items = data.get(category, []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
 
         active_count = 0
         for item in items:
             status = str(item.get("status", "")).lower()
-
             if status not in ALLOWED_STATUSES:
                 continue
 
             active_count += 1
             show_obj = item.get("show") or item.get("anime") or item.get("movie") or item
+            raw_title = show_obj.get("title", "")
+
+            # Extract strict Simkl ID to prevent duplicate English/Romaji outputs
+            simkl_id = ""
+            if isinstance(show_obj, dict) and "ids" in show_obj:
+                simkl_id = show_obj["ids"].get("simkl", "")
+            if not simkl_id and "ids" in item:
+                simkl_id = item["ids"].get("simkl", "")
+            if not simkl_id:
+                simkl_id = clean_string(raw_title)
 
             extracted_ids = extract_all_ids(show_obj)
             user_ids.update(extracted_ids)
 
-            raw_title = show_obj.get("title", "")
             cleaned = clean_string(raw_title)
             if cleaned:
                 user_titles.add(cleaned)
 
-            next_info = item.get("next_to_watch_info")
-            if next_info and isinstance(next_info, dict):
-                ep_date = next_info.get("date") or next_info.get("release_date")
+            # Movies lack next_to_watch_info endpoints; parse release directly
+            if category == "movies":
+                ep_date = None
+                if isinstance(show_obj, dict):
+                    ep_date = show_obj.get("release_date") or show_obj.get("date")
+                if not ep_date:
+                    ep_date = item.get("release_date")
+                
                 if ep_date:
                     direct_events.append(
                         {
                             "title": raw_title or "Title",
-                            "season": safe_int(next_info.get("season"), 1) if category != "movies" else None,
-                            "episode": safe_int(next_info.get("episode"), 1) if category != "movies" else None,
-                            "ep_title": next_info.get("title", ""),
+                            "season": None,
+                            "episode": None,
+                            "ep_title": "Movie Release",
                             "date": ep_date,
                             "type": category,
+                            "simkl_id": str(simkl_id),
                         }
                     )
+            else:
+                next_info = item.get("next_to_watch_info")
+                if next_info and isinstance(next_info, dict):
+                    ep_date = next_info.get("date") or next_info.get("release_date")
+                    if ep_date:
+                        direct_events.append(
+                            {
+                                "title": raw_title or "Title",
+                                "season": safe_int(next_info.get("season"), 1),
+                                "episode": safe_int(next_info.get("episode"), 1),
+                                "ep_title": next_info.get("title", ""),
+                                "date": ep_date,
+                                "type": category,
+                                "simkl_id": str(simkl_id),
+                            }
+                        )
 
         print(f"    Found {active_count} active items in {category}.")
 
@@ -138,11 +160,9 @@ def get_user_watchlist():
 
 
 def get_calendar_events(user_ids, user_titles):
-    """Scan calendar feeds for active watchlist shows and movies."""
     now = datetime.utcnow()
     current_year = now.year
     current_month = now.month
-
     next_month_dt = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
 
     calendar_urls = [
@@ -168,17 +188,21 @@ def get_calendar_events(user_ids, user_titles):
         feed_matches = 0
         for entry in feed:
             entry_ids = extract_all_ids(entry)
-
             show_obj = entry.get("show") if isinstance(entry.get("show"), dict) else {}
             entry_title = (
-                entry.get("show_title")
-                or entry.get("anime_title")
-                or entry.get("movie_title")
-                or show_obj.get("title")
-                or entry.get("title", "")
+                entry.get("show_title") or entry.get("anime_title") or entry.get("movie_title")
+                or show_obj.get("title") or entry.get("title", "")
             )
-            cleaned_entry_title = clean_string(entry_title)
+            
+            simkl_id = ""
+            if isinstance(entry.get("ids"), dict):
+                simkl_id = entry["ids"].get("simkl", "")
+            if not simkl_id and isinstance(show_obj, dict) and "ids" in show_obj:
+                simkl_id = show_obj["ids"].get("simkl", "")
+            if not simkl_id:
+                simkl_id = clean_string(entry_title)
 
+            cleaned_entry_title = clean_string(entry_title)
             id_match = bool(entry_ids & user_ids)
             title_match = cleaned_entry_title in user_titles if cleaned_entry_title else False
 
@@ -192,6 +216,7 @@ def get_calendar_events(user_ids, user_titles):
                         "ep_title": entry.get("episode_title") or entry.get("title", ""),
                         "date": entry.get("date") or entry.get("air_date") or entry.get("release_date"),
                         "type": category,
+                        "simkl_id": str(simkl_id),
                     }
                 )
 
@@ -228,33 +253,33 @@ def generate_ics(events):
 
     for ev in events:
         dt_start = parse_iso_date(ev.get("date"))
-        if not dt_start:
-            continue
-
-        if dt_start < now_cutoff:
+        if not dt_start or dt_start < now_cutoff:
             continue
 
         dt_end = dt_start + timedelta(minutes=45)
-
+        sid = ev.get("simkl_id", clean_string(ev['title']))
         is_movie = ev.get("type") == "movies" or (ev.get("season") is None and ev.get("episode") is None)
-        title_safe = clean_string(ev['title'])
 
+        # Utilize simkl_id for perfect duplicate collision across languages
         if is_movie:
             summary = f"{ev['title']}"
-            dedup_key = f"movie-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
+            dedup_key = f"movie-{sid}"
         else:
             season = safe_int(ev.get("season"), 1)
             episode = safe_int(ev.get("episode"), 1)
             ep_code = f"S{season:02d}E{episode:02d}"
             summary = f"{ev['title']} {ep_code}"
-            dedup_key = f"tv-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}-s{season:02d}e{episode:02d}"
+            dedup_key = f"tv-{sid}-s{season:02d}e{episode:02d}"
 
         if dedup_key in seen_time_slots:
             continue
         seen_time_slots.add(dedup_key)
 
         description = ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
-        uid_str = f"{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
+        
+        # Clean UID string to comply strictly with ICS format
+        uid_clean = re.sub(r"[^a-z0-9\-]", "", str(dedup_key).lower())
+        uid_str = f"{uid_clean}@{dt_start.strftime('%Y%m%d')}"
 
         dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -282,7 +307,7 @@ def update_gist(ics_content):
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/4.1",
+        "User-Agent": "SimklCalendarExporter/4.2",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
