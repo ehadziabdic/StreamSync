@@ -14,6 +14,16 @@ GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 # ==========================================
 
 
+def safe_int(val, default=1):
+    """Safely convert season/episode values to integers, even if returned as a dict."""
+    if isinstance(val, dict):
+        val = val.get("number") or val.get("season") or val.get("episode")
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def fetch_json(url, headers=None):
     if headers is None:
         headers = {}
@@ -23,7 +33,7 @@ def fetch_json(url, headers=None):
     try:
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode("utf-8"))
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -31,7 +41,7 @@ def clean_string(text):
     """Normalize text for fuzzy title matching."""
     if not text:
         return ""
-    return re.sub(r"[^a-z0-9]", "", text.lower())
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
 def extract_all_ids(obj):
@@ -100,8 +110,8 @@ def get_user_watchlist():
                     direct_events.append(
                         {
                             "title": raw_title or "TV Show",
-                            "season": next_info.get("season", 1),
-                            "episode": next_info.get("episode", 1),
+                            "season": safe_int(next_info.get("season"), 1),
+                            "episode": safe_int(next_info.get("episode"), 1),
                             "ep_title": next_info.get("title", ""),
                             "date": ep_date,
                         }
@@ -151,8 +161,8 @@ def get_calendar_events(user_ids, user_titles):
                 matched_events.append(
                     {
                         "title": entry_title or "TV Show",
-                        "season": entry.get("season", 1),
-                        "episode": entry.get("episode", 1),
+                        "season": safe_int(entry.get("season"), 1),
+                        "episode": safe_int(entry.get("episode"), 1),
                         "ep_title": entry.get("episode_title")
                         or entry.get("title", ""),
                         "date": entry.get("date")
@@ -170,7 +180,7 @@ def parse_iso_date(date_str):
     if not date_str:
         return None
     clean_str = (
-        date_str.replace("Z", "").replace("T", " ").split("+")[0].split(".")[0]
+        str(date_str).replace("Z", "").replace("T", " ").split("+")[0].split(".")[0]
     )
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
@@ -200,8 +210,8 @@ def generate_ics(events):
 
         dt_end = dt_start + timedelta(minutes=45)
 
-        season = ev.get("season", 1)
-        episode = ev.get("episode", 1)
+        season = safe_int(ev.get("season"), 1)
+        episode = safe_int(ev.get("episode"), 1)
         ep_code = f"S{season:02d}E{episode:02d}"
 
         summary = f"{ev['title']} {ep_code}"
@@ -267,7 +277,6 @@ def update_gist(ics_content):
 
 
 def main():
-    # Verify environment secrets exist
     missing = [
         var
         for var, val in [
