@@ -27,7 +27,7 @@ def safe_int(val, default=1):
 def fetch_json(url, headers=None):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/2.0"
+    headers["User-Agent"] = "SimklCalendarExporter/3.0"
 
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -45,12 +45,18 @@ def clean_string(text):
 
 
 def extract_all_ids(obj):
-    """Extract all valid Simkl, TVDB, and IMDb IDs from an object."""
+    """Extract all valid Simkl, TVDB, IMDb, and TMDB IDs from any object structure."""
     ids = set()
     if not isinstance(obj, dict):
         return ids
 
-    targets = [obj, obj.get("show"), obj.get("anime"), obj.get("ids")]
+    targets = [
+        obj,
+        obj.get("show"),
+        obj.get("anime"),
+        obj.get("movie"),
+        obj.get("ids"),
+    ]
     for t in targets:
         if isinstance(t, dict):
             for k in [
@@ -85,7 +91,7 @@ def extract_all_ids(obj):
 
 
 def get_user_watchlist():
-    """Fetch user shows and anime watchlist from Simkl Sync API."""
+    """Fetch active shows, anime, and movies watchlist from Simkl Sync API."""
     headers = {
         "Authorization": f"Bearer {SIMKL_ACCESS_TOKEN}",
         "simkl-api-key": SIMKL_CLIENT_ID,
@@ -95,7 +101,8 @@ def get_user_watchlist():
     user_titles = set()
     direct_events = []
 
-    for category in ["shows", "anime"]:
+    # Check shows, anime, and movies
+    for category in ["shows", "anime", "movies"]:
         url = f"https://api.simkl.com/sync/all-items/{category}?next_watch_info=yes"
         print(f"[*] Fetching watchlist for: {category}...")
         data = fetch_json(url, headers=headers)
@@ -111,7 +118,17 @@ def get_user_watchlist():
         print(f"    Found {len(items)} items in {category}.")
 
         for item in items:
-            show_obj = item.get("show") or item.get("anime") or item
+            # Filter out dropped or completed items
+            status = str(item.get("status", "")).lower()
+            if status in ["dropped", "completed"]:
+                continue
+
+            show_obj = (
+                item.get("show")
+                or item.get("anime")
+                or item.get("movie")
+                or item
+            )
 
             extracted_ids = extract_all_ids(show_obj)
             user_ids.update(extracted_ids)
@@ -121,13 +138,14 @@ def get_user_watchlist():
             if cleaned:
                 user_titles.add(cleaned)
 
+            # Direct release or episode info attached to watchlist
             next_info = item.get("next_to_watch_info")
             if next_info and isinstance(next_info, dict):
-                ep_date = next_info.get("date")
+                ep_date = next_info.get("date") or next_info.get("release_date")
                 if ep_date:
                     direct_events.append(
                         {
-                            "title": raw_title or "TV Show",
+                            "title": raw_title or "Title",
                             "season": safe_int(next_info.get("season"), 1),
                             "episode": safe_int(next_info.get("episode"), 1),
                             "ep_title": next_info.get("title", ""),
@@ -139,7 +157,7 @@ def get_user_watchlist():
 
 
 def get_calendar_events(user_ids, user_titles):
-    """Scan calendar JSON files and strictly match against user watchlist."""
+    """Scan rolling and monthly calendar feeds for active watchlist items."""
     now = datetime.utcnow()
     current_year = now.year
     current_month = now.month
@@ -149,10 +167,13 @@ def get_calendar_events(user_ids, user_titles):
     calendar_urls = [
         "https://data.simkl.in/calendar/tv.json",
         "https://data.simkl.in/calendar/anime.json",
+        "https://data.simkl.in/calendar/movies.json",
         f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json",
         f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json",
+        f"https://data.simkl.in/calendar/{current_year}/{current_month}/movies.json",
         f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json",
         f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json",
+        f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/movies.json",
     ]
 
     matched_events = []
@@ -166,10 +187,23 @@ def get_calendar_events(user_ids, user_titles):
         feed_matches = 0
         for entry in feed:
             entry_ids = extract_all_ids(entry)
-            entry_title = entry.get("title") or entry.get("show_title", "")
+
+            # Prioritize show/movie title over episode title
+            show_obj = (
+                entry.get("show")
+                if isinstance(entry.get("show"), dict)
+                else {}
+            )
+            entry_title = (
+                entry.get("show_title")
+                or entry.get("anime_title")
+                or entry.get("movie_title")
+                or show_obj.get("title")
+                or entry.get("title", "")
+            )
             cleaned_entry_title = clean_string(entry_title)
 
-            # Strict matching: EXACT ID match or EXACT Title match
+            # Match by ID or exact show title
             id_match = bool(entry_ids & user_ids)
             title_match = (
                 cleaned_entry_title in user_titles
@@ -181,7 +215,7 @@ def get_calendar_events(user_ids, user_titles):
                 feed_matches += 1
                 matched_events.append(
                     {
-                        "title": entry_title or "TV Show",
+                        "title": entry_title or "Title",
                         "season": safe_int(entry.get("season"), 1),
                         "episode": safe_int(entry.get("episode"), 1),
                         "ep_title": entry.get("episode_title")
@@ -278,7 +312,7 @@ def update_gist(ics_content):
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/2.0",
+        "User-Agent": "SimklCalendarExporter/3.0",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
