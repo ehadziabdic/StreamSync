@@ -1,5 +1,5 @@
-import os
 import json
+import os
 import re
 import urllib.request
 from datetime import datetime, timedelta
@@ -38,14 +38,14 @@ def fetch_json(url, headers=None):
 
 
 def clean_string(text):
-    """Normalize text for fuzzy title matching."""
+    """Normalize text for exact title matching."""
     if not text:
         return ""
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
 def extract_all_ids(obj):
-    """Extract all possible Simkl, TVDB, and IMDb IDs from any object structure."""
+    """Extract all valid Simkl, TVDB, and IMDb IDs from an object."""
     ids = set()
     if not isinstance(obj, dict):
         return ids
@@ -53,15 +53,33 @@ def extract_all_ids(obj):
     targets = [obj, obj.get("show"), obj.get("anime"), obj.get("ids")]
     for t in targets:
         if isinstance(t, dict):
-            for k in ["simkl", "simkl_id", "tvdb", "tvdb_id", "imdb", "tmdb", "mal"]:
+            for k in [
+                "simkl",
+                "simkl_id",
+                "tvdb",
+                "tvdb_id",
+                "imdb",
+                "tmdb",
+                "mal",
+            ]:
                 val = t.get(k)
-                if val:
+                if val is not None and str(val).strip() not in (
+                    "",
+                    "0",
+                    "None",
+                    "null",
+                ):
                     ids.add(str(val))
 
             ids_dict = t.get("ids")
             if isinstance(ids_dict, dict):
                 for val in ids_dict.values():
-                    if val:
+                    if val is not None and str(val).strip() not in (
+                        "",
+                        "0",
+                        "None",
+                        "null",
+                    ):
                         ids.add(str(val))
     return ids
 
@@ -121,7 +139,7 @@ def get_user_watchlist():
 
 
 def get_calendar_events(user_ids, user_titles):
-    """Scan rolling and monthly calendar JSON files for matching user shows."""
+    """Scan calendar JSON files and strictly match against user watchlist."""
     now = datetime.utcnow()
     current_year = now.year
     current_month = now.month
@@ -151,9 +169,12 @@ def get_calendar_events(user_ids, user_titles):
             entry_title = entry.get("title") or entry.get("show_title", "")
             cleaned_entry_title = clean_string(entry_title)
 
+            # Strict matching: EXACT ID match or EXACT Title match
             id_match = bool(entry_ids & user_ids)
-            title_match = cleaned_entry_title in user_titles or any(
-                ut in cleaned_entry_title for ut in user_titles if len(ut) > 4
+            title_match = (
+                cleaned_entry_title in user_titles
+                if cleaned_entry_title
+                else False
             )
 
             if id_match or title_match:
@@ -180,7 +201,11 @@ def parse_iso_date(date_str):
     if not date_str:
         return None
     clean_str = (
-        str(date_str).replace("Z", "").replace("T", " ").split("+")[0].split(".")[0]
+        str(date_str)
+        .replace("Z", "")
+        .replace("T", " ")
+        .split("+")[0]
+        .split(".")[0]
     )
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
