@@ -5,8 +5,21 @@ from datetime import datetime
 CLIENT_ID = os.environ.get("SIMKL_CLIENT_ID")
 ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
-# Fallback to check both GH_PAT_TOKEN and GIST_TOKEN
 GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
+
+# Required by Simkl API Rules to prevent client_id suspension
+COMMON_PARAMS = {
+    "client_id": CLIENT_ID,
+    "app-name": "SimklCalendarExporter",
+    "app-version": "1.0"
+}
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "User-Agent": "SimklCalendarExporter/1.0",
+    "simkl-api-key": CLIENT_ID,
+    "Authorization": f"Bearer {ACCESS_TOKEN}"
+}
 
 def format_ics_dt(dt_str):
     if not dt_str:
@@ -19,22 +32,15 @@ def format_ics_dt(dt_str):
         return None
 
 def main():
-    if not GH_TOKEN:
-        print("❌ ERROR: GH_PAT_TOKEN environment variable is missing!")
+    if not GH_TOKEN or not CLIENT_ID or not ACCESS_TOKEN:
+        print("❌ ERROR: Missing required environment variables!")
         exit(1)
 
-    simkl_headers = {
-        "Content-Type": "application/json",
-        "simkl-api-key": CLIENT_ID,
-        "Authorization": f"Bearer {ACCESS_TOKEN}"
-    }
-
     print("Fetching watchlist from Simkl...")
-    # Fetch all shows with next_watch_info attached
-    sync_res = requests.get(
-        "https://api.simkl.com/sync/all-items/shows?next_watch_info=yes", 
-        headers=simkl_headers
-    )
+    sync_url = "https://api.simkl.com/sync/all-items/shows"
+    params = {**COMMON_PARAMS, "next_watch_info": "yes"}
+    
+    sync_res = requests.get(sync_url, headers=HEADERS, params=params)
     
     if sync_res.status_code != 200:
         print(f"❌ Error fetching watchlist from Simkl: {sync_res.status_code} - {sync_res.text}")
@@ -47,7 +53,7 @@ def main():
     watchlist_ids = set()
     events = []
 
-    # 1. Collect integer Simkl IDs and parse immediate next episodes
+    # 1. Parse watchlist items for next episode metadata
     for item in shows_list:
         show = item.get("show", {})
         raw_id = show.get("ids", {}).get("simkl")
@@ -70,9 +76,9 @@ def main():
             if dt_formatted:
                 events.append((dt_formatted, summary, f"Simkl ID: {raw_id}"))
 
-    # 2. Cross-reference with Simkl's global 33-day TV schedule
+    # 2. Cross-reference with Simkl's global 33-day TV schedule CDN
     print("Cross-referencing with Simkl 33-day TV schedule...")
-    cal_res = requests.get("https://data.simkl.in/calendar/tv.json")
+    cal_res = requests.get("https://data.simkl.in/calendar/tv.json", headers={"User-Agent": "SimklCalendarExporter/1.0"})
     if cal_res.status_code == 200:
         for item in cal_res.json():
             raw_id = item.get("ids", {}).get("simkl")
@@ -88,8 +94,8 @@ def main():
                 if dt_formatted:
                     events.append((dt_formatted, summary, f"Simkl ID: {raw_id}"))
 
-    # 3. Also check Anime schedule in case you track anime shows
-    anime_cal_res = requests.get("https://data.simkl.in/calendar/anime.json")
+    # 3. Cross-reference with Anime schedule CDN
+    anime_cal_res = requests.get("https://data.simkl.in/calendar/anime.json", headers={"User-Agent": "SimklCalendarExporter/1.0"})
     if anime_cal_res.status_code == 200:
         for item in anime_cal_res.json():
             raw_id = item.get("ids", {}).get("simkl")
@@ -111,7 +117,7 @@ def main():
 
     print(f"Total calendar events found: {len(unique_events)}")
 
-    # Build standard iCalendar format
+    # Build iCalendar file content
     ics_lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -133,7 +139,7 @@ def main():
     ics_lines.append("END:VCALENDAR")
     ics_content = "\n".join(ics_lines)
 
-    # Push to GitHub Gist using correct Bearer token authentication
+    # Push to GitHub Gist
     print("Updating GitHub Gist...")
     gist_headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
