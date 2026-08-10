@@ -4,13 +4,13 @@ from datetime import datetime
 
 CLIENT_ID = os.environ.get("SIMKL_CLIENT_ID")
 ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
-GIST_TOKEN = os.environ.get("GIST_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
+# Fallback to check both GH_PAT_TOKEN and GIST_TOKEN
+GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 
 def format_ics_dt(dt_str):
     if not dt_str:
         return None
-    # Normalize ISO format string for iCal (YYYYMMDDTHHMMSSZ)
     dt_str = dt_str.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(dt_str)
@@ -19,22 +19,26 @@ def format_ics_dt(dt_str):
         return None
 
 def main():
-    headers = {
+    if not GH_TOKEN:
+        print("❌ ERROR: GH_PAT_TOKEN environment variable is missing!")
+        exit(1)
+
+    simkl_headers = {
         "Content-Type": "application/json",
         "simkl-api-key": CLIENT_ID,
         "Authorization": f"Bearer {ACCESS_TOKEN}"
     }
 
     print("Fetching watchlist from Simkl...")
-    # Fetch all shows in user's library with next episode metadata attached
+    # Fetch all shows with next_watch_info attached
     sync_res = requests.get(
         "https://api.simkl.com/sync/all-items/shows?next_watch_info=yes", 
-        headers=headers
+        headers=simkl_headers
     )
     
     if sync_res.status_code != 200:
-        print(f"Error fetching watchlist from Simkl: {sync_res.status_code} - {sync_res.text}")
-        return
+        print(f"❌ Error fetching watchlist from Simkl: {sync_res.status_code} - {sync_res.text}")
+        exit(1)
 
     shows_data = sync_res.json()
     shows_list = shows_data.get("shows", [])
@@ -43,12 +47,15 @@ def main():
     watchlist_ids = set()
     events = []
 
-    # 1. Parse 'next_to_watch_info' from watchlist items
+    # 1. Collect integer Simkl IDs and parse immediate next episodes
     for item in shows_list:
         show = item.get("show", {})
-        simkl_id = show.get("ids", {}).get("simkl")
-        if simkl_id:
-            watchlist_ids.add(simkl_id)
+        raw_id = show.get("ids", {}).get("simkl")
+        if raw_id is not None:
+            try:
+                watchlist_ids.add(int(raw_id))
+            except ValueError:
+                pass
 
         next_info = item.get("next_to_watch_info")
         if next_info and next_info.get("date"):
@@ -61,16 +68,15 @@ def main():
             summary = f"{show_title} - {ep_code} - {ep_title}"
             dt_formatted = format_ics_dt(next_info["date"])
             if dt_formatted:
-                events.append((dt_formatted, summary, f"Simkl ID: {simkl_id}"))
+                events.append((dt_formatted, summary, f"Simkl ID: {raw_id}"))
 
-    # 2. Query 33-day broadcast calendar and filter by user's watchlist
+    # 2. Cross-reference with Simkl's global 33-day TV schedule
     print("Cross-referencing with Simkl 33-day TV schedule...")
     cal_res = requests.get("https://data.simkl.in/calendar/tv.json")
     if cal_res.status_code == 200:
-        cal_items = cal_res.json()
-        for item in cal_items:
-            simkl_id = item.get("ids", {}).get("simkl")
-            if simkl_id in watchlist_ids:
+        for item in cal_res.json():
+            raw_id = item.get("ids", {}).get("simkl")
+            if raw_id is not None and int(raw_id) in watchlist_ids:
                 show_title = item.get("title", "Show")
                 date_str = item.get("date")
                 season = item.get("season", 0)
@@ -80,16 +86,32 @@ def main():
                 summary = f"{show_title} - S{season:02d}E{episode:02d} - {ep_title}"
                 dt_formatted = format_ics_dt(date_str)
                 if dt_formatted:
-                    events.append((dt_formatted, summary, f"Simkl ID: {simkl_id}"))
+                    events.append((dt_formatted, summary, f"Simkl ID: {raw_id}"))
 
-    print(f"Total calendar events found: {len(events)}")
+    # 3. Also check Anime schedule in case you track anime shows
+    anime_cal_res = requests.get("https://data.simkl.in/calendar/anime.json")
+    if anime_cal_res.status_code == 200:
+        for item in anime_cal_res.json():
+            raw_id = item.get("ids", {}).get("simkl")
+            if raw_id is not None and int(raw_id) in watchlist_ids:
+                show_title = item.get("title", "Anime")
+                date_str = item.get("date")
+                episode = item.get("episode", 0)
+                ep_title = item.get("episode_title") or f"E{episode:02d}"
+                
+                summary = f"{show_title} - E{episode:02d} - {ep_title}"
+                dt_formatted = format_ics_dt(date_str)
+                if dt_formatted:
+                    events.append((dt_formatted, summary, f"Simkl ID: {raw_id}"))
 
-    # Deduplicate events by (date, summary)
+    # Deduplicate events
     unique_events = {}
     for dt_str, summary, desc in events:
         unique_events[(dt_str, summary)] = desc
 
-    # Build standard iCalendar file content
+    print(f"Total calendar events found: {len(unique_events)}")
+
+    # Build standard iCalendar format
     ics_lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -111,13 +133,15 @@ def main():
     ics_lines.append("END:VCALENDAR")
     ics_content = "\n".join(ics_lines)
 
-    # Push updated .ics content to GitHub Gist
+    # Push to GitHub Gist using correct Bearer token authentication
     print("Updating GitHub Gist...")
     gist_headers = {
-        "Authorization": f"token {GIST_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
     }
     payload = {
+        "description": "Updated Simkl Calendar Feed",
         "files": {
             "trakt.ics": {
                 "content": ics_content
@@ -131,9 +155,10 @@ def main():
     )
     
     if gist_res.status_code == 200:
-        print("Successfully updated trakt.ics in GitHub Gist!")
+        print("✅ SUCCESS: trakt.ics updated in GitHub Gist!")
     else:
-        print(f"Failed to update Gist: {gist_res.status_code} - {gist_res.text}")
+        print(f"❌ Failed to update Gist: {gist_res.status_code} - {gist_res.text}")
+        exit(1)
 
 if __name__ == "__main__":
     main()
