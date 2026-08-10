@@ -1,5 +1,4 @@
 import os
-import json
 import requests
 from uuid import uuid4
 from datetime import datetime
@@ -7,165 +6,87 @@ from dateutil.relativedelta import relativedelta
 from pytz import utc
 from icalendar import Calendar, Event
 
-# --- 1. SETTINGS ---
-CLIENT_ID = os.environ.get('TRAKT_CLIENT_ID')
-CLIENT_SECRET = os.environ.get('TRAKT_CLIENT_SECRET')
+CLIENT_ID = os.environ.get('SIMKL_CLIENT_ID')
+ACCESS_TOKEN = os.environ.get('SIMKL_ACCESS_TOKEN')
 GIST_ID = os.environ.get('GIST_ID')
 GH_TOKEN = os.environ.get('GH_PAT_TOKEN')
-API_URL = "https://api.trakt.tv"
 
-def parse_trakt_datetime(value):
-    if "T" in value:
-        return datetime.strptime(value[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=utc)
-    return datetime.strptime(value[:10], '%Y-%m-%d').replace(tzinfo=utc)
-
-
-def normalize_runtime(runtime, default_minutes):
+def parse_dt(val):
+    if not val:
+        return None
     try:
-        normalized = int(runtime)
-        if normalized <= 0:
-            return default_minutes
-        return normalized
-    except (TypeError, ValueError):
-        return default_minutes
+        if "T" in val:
+            return datetime.strptime(val[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=utc)
+        return datetime.strptime(val[:10], '%Y-%m-%d').replace(tzinfo=utc)
+    except Exception:
+        return None
 
-# --- 2. TOKEN PERSISTENCE LOGIC (GIST) ---
-def get_stored_tokens():
-    """Fetches tokens from the Gist. If not found, falls back to GitHub Secrets."""
-    url = f"https://api.github.com/gists/{GIST_ID}"
-    headers = {"Authorization": f"Bearer {GH_TOKEN}"}
-    resp = requests.get(url, headers=headers).json()
-    
-    if 'token.json' in resp.get('files', {}):
-        return json.loads(resp['files']['token.json']['content'])
-    
-    # Fallback for the very first run
-    return {"refresh_token": os.environ.get('TRAKT_REFRESH_TOKEN')}
-
-def update_gist_files(ics_content, new_tokens):
-    """Saves both the new calendar and the new refresh token to the Gist."""
-    url = f"https://api.github.com/gists/{GIST_ID}"
-    headers = {
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    # We must format the files object correctly for the PATCH request
-    payload = {
-        "description": "Updated Trakt Calendar and Tokens",
-        "files": {
-            "trakt.ics": {"content": ics_content},
-            "token.json": {"content": json.dumps(new_tokens, indent=2)}
-        }
-    }
-    
-    print(f"Attempting to update Gist: {GIST_ID}...")
-    r = requests.patch(url, headers=headers, json=payload)
-    
-    if r.status_code == 200:
-        print("✅ SUCCESS: Gist updated.")
-    else:
-        print(f"❌ FAILED: {r.status_code}")
-        print(f"Response: {r.text}")
-        # This will make the GitHub Action fail so you can see why in the logs
-        exit(1)
-
-# --- 3. TRAKT API LOGIC ---
-def get_access_token():
-    tokens = get_stored_tokens()
-    url = f"{API_URL}/oauth/token"
-    data = {
-        "refresh_token": tokens['refresh_token'],
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
-        "grant_type": "refresh_token"
-    }
-    response = requests.post(url, json=data)
-    res_data = response.json()
-    
-    if 'access_token' not in res_data:
-        raise Exception(f"Trakt Refresh Failed: {res_data}")
-        
-    return res_data['access_token'], res_data
-
-def loadShows(access_token):
+def fetch_upcoming_episodes():
+    url = "https://api.simkl.com/tv/episodes/to-watch"
     headers = {
         "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": CLIENT_ID,
-        "Authorization": f"Bearer {access_token}"
+        "simkl-api-key": CLIENT_ID,
+        "Authorization": f"Bearer {ACCESS_TOKEN}"
     }
-    today = datetime.now().strftime("%Y-%m-%d")
-    url = f"{API_URL}/calendars/my/shows/{today}/360"
-    
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        print(f"Failed to fetch: {res.status_code}")
         return []
 
     events = []
-    for entry in response.json():
-        ep = entry['episode']
-        sh = entry['show']
-        airtime = parse_trakt_datetime(entry['first_aired'])
-        runtime = normalize_runtime(sh.get('runtime'), 30)
+    for item in res.json():
+        show = item.get('show', {})
+        ep = item.get('episode', {})
+        airtime = parse_dt(ep.get('date') or ep.get('first_aired'))
+        if not airtime:
+            continue
+
+        runtime = int(show.get('runtime') or 30)
+        s = str(ep.get('season', 1)).zfill(2)
+        e = str(ep.get('episode', 1)).zfill(2)
+        title = ep.get('title', '')
+        summary = f"{show.get('title', 'Show')} S{s}E{e}" + (f' "{title}"' if title else "")
+
         events.append({
-            "summary": f"{sh['title']} S{str(ep['season']).zfill(2)}E{str(ep['number']).zfill(2)} \"{ep['title']}\"",
+            "summary": summary,
             "start": airtime,
             "end": airtime + relativedelta(minutes=runtime)
         })
     return events
 
-def loadMovies(access_token):
+def update_gist(ics_text):
+    url = f"https://api.github.com/gists/{GIST_ID}"
     headers = {
-        "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": CLIENT_ID,
-        "Authorization": f"Bearer {access_token}"
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json"
     }
-    today = datetime.now().strftime("%Y-%m-%d")
-    url = f"{API_URL}/calendars/my/movies/{today}/360"
+    payload = {
+        "description": "Simkl Calendar Feed",
+        "files": {
+            "trakt.ics": {"content": ics_text}  # Kept as trakt.ics so your calendar link stays the same
+        }
+    }
+    r = requests.patch(url, headers=headers, json=payload)
+    if r.status_code == 200:
+        print("✅ Calendar successfully updated in Gist!")
+    else:
+        print(f"❌ Failed to update Gist: {r.status_code} {r.text}")
+        exit(1)
 
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        return []
-
-    events = []
-    for entry in response.json():
-        movie = entry['movie']
-        release_time = parse_trakt_datetime(entry['released'])
-        title = movie['title']
-        year = movie.get('year')
-        runtime = normalize_runtime(movie.get('runtime'), 120)
-
-        summary = f"{title} ({year})" if year else title
-        events.append({
-            "summary": summary,
-            "start": release_time,
-            "end": release_time + relativedelta(minutes=runtime)
-        })
-    return events
-
-# --- 4. RUN ---
 def main():
-    # 1. Get tokens & Refresh
-    access_token, new_tokens = get_access_token()
-    
-    # 2. Build Calendar
     cal = Calendar()
-    cal.add('x-wr-calname', 'Trakt Calendar')
-    all_events = loadShows(access_token) + loadMovies(access_token)
-    for ev in all_events:
+    cal.add('x-wr-calname', 'Simkl Calendar')
+    
+    for ev in fetch_upcoming_episodes():
         event = Event()
         event.add('summary', ev['summary'])
         event.add('dtstart', ev['start'])
         event.add('dtend', ev['end'])
         event.add('dtstamp', datetime.now(utc))
-        event.add('uid', f"{uuid4()}@trakt")
+        event.add('uid', f"{uuid4()}@simkl")
         cal.add_component(event)
-    
-    # 3. Save everything to Gist in one go
-    update_gist_files(cal.to_ical().decode('utf-8'), new_tokens)
+
+    update_gist(cal.to_ical().decode('utf-8'))
 
 if __name__ == "__main__":
     main()
