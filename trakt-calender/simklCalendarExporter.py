@@ -15,7 +15,7 @@ GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 
 
 def safe_int(val, default=1):
-    """Safely convert season/episode values to integers, even if returned as a dict."""
+    """Safely convert season/episode values to integers."""
     if isinstance(val, dict):
         val = val.get("number") or val.get("season") or val.get("episode")
     try:
@@ -27,7 +27,7 @@ def safe_int(val, default=1):
 def fetch_json(url, headers=None):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/3.0"
+    headers["User-Agent"] = "SimklCalendarExporter/4.0"
 
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -45,7 +45,7 @@ def clean_string(text):
 
 
 def extract_all_ids(obj):
-    """Extract all valid Simkl, TVDB, IMDb, and TMDB IDs from any object structure."""
+    """Extract all valid Simkl, TVDB, IMDb, and TMDB IDs."""
     ids = set()
     if not isinstance(obj, dict):
         return ids
@@ -91,7 +91,7 @@ def extract_all_ids(obj):
 
 
 def get_user_watchlist():
-    """Fetch active shows, anime, and movies watchlist from Simkl Sync API."""
+    """Fetch active watchlist items (watching / plantowatch only)."""
     headers = {
         "Authorization": f"Bearer {SIMKL_ACCESS_TOKEN}",
         "simkl-api-key": SIMKL_CLIENT_ID,
@@ -101,7 +101,9 @@ def get_user_watchlist():
     user_titles = set()
     direct_events = []
 
-    # Check shows, anime, and movies
+    # Valid active statuses to include
+    ALLOWED_STATUSES = {"watching", "plantowatch", "plan to watch", "hold"}
+
     for category in ["shows", "anime", "movies"]:
         url = f"https://api.simkl.com/sync/all-items/{category}?next_watch_info=yes"
         print(f"[*] Fetching watchlist for: {category}...")
@@ -115,14 +117,16 @@ def get_user_watchlist():
             if isinstance(data, dict)
             else (data if isinstance(data, list) else [])
         )
-        print(f"    Found {len(items)} items in {category}.")
 
+        active_count = 0
         for item in items:
-            # Filter out dropped or completed items
             status = str(item.get("status", "")).lower()
-            if status in ["dropped", "completed"]:
+
+            # Skip dropped, completed, or unlisted items
+            if status not in ALLOWED_STATUSES:
                 continue
 
+            active_count += 1
             show_obj = (
                 item.get("show")
                 or item.get("anime")
@@ -138,7 +142,6 @@ def get_user_watchlist():
             if cleaned:
                 user_titles.add(cleaned)
 
-            # Direct release or episode info attached to watchlist
             next_info = item.get("next_to_watch_info")
             if next_info and isinstance(next_info, dict):
                 ep_date = next_info.get("date") or next_info.get("release_date")
@@ -146,18 +149,29 @@ def get_user_watchlist():
                     direct_events.append(
                         {
                             "title": raw_title or "Title",
-                            "season": safe_int(next_info.get("season"), 1),
-                            "episode": safe_int(next_info.get("episode"), 1),
+                            "season": (
+                                safe_int(next_info.get("season"), 1)
+                                if category != "movies"
+                                else None
+                            ),
+                            "episode": (
+                                safe_int(next_info.get("episode"), 1)
+                                if category != "movies"
+                                else None
+                            ),
                             "ep_title": next_info.get("title", ""),
                             "date": ep_date,
+                            "type": category,
                         }
                     )
+
+        print(f"    Found {active_count} active items in {category}.")
 
     return user_ids, user_titles, direct_events
 
 
 def get_calendar_events(user_ids, user_titles):
-    """Scan rolling and monthly calendar feeds for active watchlist items."""
+    """Scan calendar feeds for active watchlist shows and movies."""
     now = datetime.utcnow()
     current_year = now.year
     current_month = now.month
@@ -165,20 +179,38 @@ def get_calendar_events(user_ids, user_titles):
     next_month_dt = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
 
     calendar_urls = [
-        "https://data.simkl.in/calendar/tv.json",
-        "https://data.simkl.in/calendar/anime.json",
-        "https://data.simkl.in/calendar/movies.json",
-        f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json",
-        f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json",
-        f"https://data.simkl.in/calendar/{current_year}/{current_month}/movies.json",
-        f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json",
-        f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json",
-        f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/movies.json",
+        ("https://data.simkl.in/calendar/tv.json", "shows"),
+        ("https://data.simkl.in/calendar/anime.json", "anime"),
+        ("https://data.simkl.in/calendar/movies.json", "movies"),
+        (
+            f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json",
+            "shows",
+        ),
+        (
+            f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json",
+            "anime",
+        ),
+        (
+            f"https://data.simkl.in/calendar/{current_year}/{current_month}/movies.json",
+            "movies",
+        ),
+        (
+            f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json",
+            "shows",
+        ),
+        (
+            f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json",
+            "anime",
+        ),
+        (
+            f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/movies.json",
+            "movies",
+        ),
     ]
 
     matched_events = []
 
-    for url in calendar_urls:
+    for url, category in calendar_urls:
         print(f"[*] Scanning feed: {url}...")
         feed = fetch_json(url)
         if not feed or not isinstance(feed, list):
@@ -188,7 +220,6 @@ def get_calendar_events(user_ids, user_titles):
         for entry in feed:
             entry_ids = extract_all_ids(entry)
 
-            # Prioritize show/movie title over episode title
             show_obj = (
                 entry.get("show")
                 if isinstance(entry.get("show"), dict)
@@ -203,7 +234,6 @@ def get_calendar_events(user_ids, user_titles):
             )
             cleaned_entry_title = clean_string(entry_title)
 
-            # Match by ID or exact show title
             id_match = bool(entry_ids & user_ids)
             title_match = (
                 cleaned_entry_title in user_titles
@@ -216,13 +246,22 @@ def get_calendar_events(user_ids, user_titles):
                 matched_events.append(
                     {
                         "title": entry_title or "Title",
-                        "season": safe_int(entry.get("season"), 1),
-                        "episode": safe_int(entry.get("episode"), 1),
+                        "season": (
+                            safe_int(entry.get("season"), 1)
+                            if category != "movies"
+                            else None
+                        ),
+                        "episode": (
+                            safe_int(entry.get("episode"), 1)
+                            if category != "movies"
+                            else None
+                        ),
                         "ep_title": entry.get("episode_title")
                         or entry.get("title", ""),
                         "date": entry.get("date")
                         or entry.get("air_date")
                         or entry.get("release_date"),
+                        "type": category,
                     }
                 )
 
@@ -260,30 +299,46 @@ def generate_ics(events):
         "METHOD:PUBLISH",
     ]
 
-    seen_uids = set()
+    seen_time_slots = set()
+    now_cutoff = datetime.utcnow() - timedelta(days=1)
 
     for ev in events:
         dt_start = parse_iso_date(ev.get("date"))
         if not dt_start:
             continue
 
+        # Filter out past events aired before yesterday
+        if dt_start < now_cutoff:
+            continue
+
         dt_end = dt_start + timedelta(minutes=45)
 
-        season = safe_int(ev.get("season"), 1)
-        episode = safe_int(ev.get("episode"), 1)
-        ep_code = f"S{season:02d}E{episode:02d}"
-
-        summary = f"{ev['title']} {ep_code}"
-        description = (
-            ev["ep_title"] if ev.get("ep_title") else f"Episode {ep_code}"
+        # Build summary and deduplication key based on show type
+        is_movie = ev.get("type") == "movies" or (
+            ev.get("season") is None and ev.get("episode") is None
         )
 
-        uid_raw = clean_string(
-            f"{ev['title']}-{ep_code}-{dt_start.strftime('%Y%m%d%H%M')}"
-        )
-        if uid_raw in seen_uids:
+        if is_movie:
+            summary = f"{ev['title']}"
+            dedup_key = (
+                f"movie-{dt_start.strftime('%Y%m%d%H%M')}-{clean_string(ev['title'])[:10]}"
+            )
+        else:
+            season = safe_int(ev.get("season"), 1)
+            episode = safe_int(ev.get("episode"), 1)
+            ep_code = f"S{season:02d}E{episode:02d}"
+            summary = f"{ev['title']} {ep_code}"
+            # Deduplicate alternate English/Japanese title variations sharing time + S/E numbers
+            dedup_key = f"tv-{dt_start.strftime('%Y%m%d%H%M')}-s{season:02d}e{episode:02d}"
+
+        if dedup_key in seen_time_slots:
             continue
-        seen_uids.add(uid_raw)
+        seen_time_slots.add(dedup_key)
+
+        description = (
+            ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
+        )
+        uid_str = clean_string(f"{summary}-{dt_start.strftime('%Y%m%d%H%M')}")
 
         dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -292,7 +347,7 @@ def generate_ics(events):
         lines.extend(
             [
                 "BEGIN:VEVENT",
-                f"UID:{uid_raw}@simkl",
+                f"UID:{uid_str}@simkl",
                 f"DTSTAMP:{dtstamp}",
                 f"DTSTART:{str_start}",
                 f"DTEND:{str_end}",
@@ -303,16 +358,16 @@ def generate_ics(events):
         )
 
     lines.append("END:VCALENDAR")
-    return "\n".join(lines), len(seen_uids)
+    return "\n".join(lines), len(seen_time_slots)
 
 
 def update_gist(ics_content):
-    """Publish generated .ics content directly to your GitHub Gist."""
+    """Publish generated .ics content directly to GitHub Gist."""
     url = f"https://api.github.com/gists/{GIST_ID}"
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/3.0",
+        "User-Agent": "SimklCalendarExporter/4.0",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
@@ -357,7 +412,7 @@ def main():
     all_events = direct_events + calendar_events
     ics_content, event_count = generate_ics(all_events)
 
-    print(f"\n[+] Generated calendar with {event_count} total upcoming events.")
+    print(f"\n[+] Generated calendar with {event_count} active upcoming events.")
     update_gist(ics_content)
 
 
