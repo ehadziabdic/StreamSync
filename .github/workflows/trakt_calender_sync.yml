@@ -1,4 +1,4 @@
-name: Update Trakt Calendar
+name: Update Calendar
 
 on:
   schedule:
@@ -14,16 +14,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: pip install requests pytz icalendar python-dateutil typing_extensions
-
       - name: Run exporter
         working-directory: ./trakt-calender
         env:
-          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
-          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
-          TRAKT_REFRESH_TOKEN: ${{ secrets.TRAKT_REFRESH_TOKEN }}
+          SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
+          SIMKL_ACCESS_TOKEN: ${{ secrets.SIMKL_ACCESS_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GH_PAT_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
-        run: python traktCalendarExporter.py
+        run: python simklCalendarExporter.py
