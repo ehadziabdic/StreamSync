@@ -1,4 +1,4 @@
-name: Update Calendar
+name: Update Simkl Calendar
 
 on:
   schedule:
