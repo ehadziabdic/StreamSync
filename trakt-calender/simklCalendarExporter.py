@@ -27,7 +27,7 @@ def safe_int(val, default=1):
 def fetch_json(url, headers=None):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/4.0"
+    headers["User-Agent"] = "SimklCalendarExporter/4.1"
 
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -38,7 +38,7 @@ def fetch_json(url, headers=None):
 
 
 def clean_string(text):
-    """Normalize text for exact title matching."""
+    """Normalize text for exact title matching and dedup keys."""
     if not text:
         return ""
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
@@ -59,33 +59,15 @@ def extract_all_ids(obj):
     ]
     for t in targets:
         if isinstance(t, dict):
-            for k in [
-                "simkl",
-                "simkl_id",
-                "tvdb",
-                "tvdb_id",
-                "imdb",
-                "tmdb",
-                "mal",
-            ]:
+            for k in ["simkl", "simkl_id", "tvdb", "tvdb_id", "imdb", "tmdb", "mal"]:
                 val = t.get(k)
-                if val is not None and str(val).strip() not in (
-                    "",
-                    "0",
-                    "None",
-                    "null",
-                ):
+                if val is not None and str(val).strip() not in ("", "0", "None", "null"):
                     ids.add(str(val))
 
             ids_dict = t.get("ids")
             if isinstance(ids_dict, dict):
                 for val in ids_dict.values():
-                    if val is not None and str(val).strip() not in (
-                        "",
-                        "0",
-                        "None",
-                        "null",
-                    ):
+                    if val is not None and str(val).strip() not in ("", "0", "None", "null"):
                         ids.add(str(val))
     return ids
 
@@ -101,7 +83,6 @@ def get_user_watchlist():
     user_titles = set()
     direct_events = []
 
-    # Valid active statuses to include
     ALLOWED_STATUSES = {"watching", "plantowatch", "plan to watch", "hold"}
 
     for category in ["shows", "anime", "movies"]:
@@ -122,17 +103,11 @@ def get_user_watchlist():
         for item in items:
             status = str(item.get("status", "")).lower()
 
-            # Skip dropped, completed, or unlisted items
             if status not in ALLOWED_STATUSES:
                 continue
 
             active_count += 1
-            show_obj = (
-                item.get("show")
-                or item.get("anime")
-                or item.get("movie")
-                or item
-            )
+            show_obj = item.get("show") or item.get("anime") or item.get("movie") or item
 
             extracted_ids = extract_all_ids(show_obj)
             user_ids.update(extracted_ids)
@@ -149,16 +124,8 @@ def get_user_watchlist():
                     direct_events.append(
                         {
                             "title": raw_title or "Title",
-                            "season": (
-                                safe_int(next_info.get("season"), 1)
-                                if category != "movies"
-                                else None
-                            ),
-                            "episode": (
-                                safe_int(next_info.get("episode"), 1)
-                                if category != "movies"
-                                else None
-                            ),
+                            "season": safe_int(next_info.get("season"), 1) if category != "movies" else None,
+                            "episode": safe_int(next_info.get("episode"), 1) if category != "movies" else None,
                             "ep_title": next_info.get("title", ""),
                             "date": ep_date,
                             "type": category,
@@ -182,30 +149,12 @@ def get_calendar_events(user_ids, user_titles):
         ("https://data.simkl.in/calendar/tv.json", "shows"),
         ("https://data.simkl.in/calendar/anime.json", "anime"),
         ("https://data.simkl.in/calendar/movies.json", "movies"),
-        (
-            f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json",
-            "shows",
-        ),
-        (
-            f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json",
-            "anime",
-        ),
-        (
-            f"https://data.simkl.in/calendar/{current_year}/{current_month}/movies.json",
-            "movies",
-        ),
-        (
-            f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json",
-            "shows",
-        ),
-        (
-            f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json",
-            "anime",
-        ),
-        (
-            f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/movies.json",
-            "movies",
-        ),
+        (f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json", "shows"),
+        (f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json", "anime"),
+        (f"https://data.simkl.in/calendar/{current_year}/{current_month}/movies.json", "movies"),
+        (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json", "shows"),
+        (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json", "anime"),
+        (f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/movies.json", "movies"),
     ]
 
     matched_events = []
@@ -220,11 +169,7 @@ def get_calendar_events(user_ids, user_titles):
         for entry in feed:
             entry_ids = extract_all_ids(entry)
 
-            show_obj = (
-                entry.get("show")
-                if isinstance(entry.get("show"), dict)
-                else {}
-            )
+            show_obj = entry.get("show") if isinstance(entry.get("show"), dict) else {}
             entry_title = (
                 entry.get("show_title")
                 or entry.get("anime_title")
@@ -235,32 +180,17 @@ def get_calendar_events(user_ids, user_titles):
             cleaned_entry_title = clean_string(entry_title)
 
             id_match = bool(entry_ids & user_ids)
-            title_match = (
-                cleaned_entry_title in user_titles
-                if cleaned_entry_title
-                else False
-            )
+            title_match = cleaned_entry_title in user_titles if cleaned_entry_title else False
 
             if id_match or title_match:
                 feed_matches += 1
                 matched_events.append(
                     {
                         "title": entry_title or "Title",
-                        "season": (
-                            safe_int(entry.get("season"), 1)
-                            if category != "movies"
-                            else None
-                        ),
-                        "episode": (
-                            safe_int(entry.get("episode"), 1)
-                            if category != "movies"
-                            else None
-                        ),
-                        "ep_title": entry.get("episode_title")
-                        or entry.get("title", ""),
-                        "date": entry.get("date")
-                        or entry.get("air_date")
-                        or entry.get("release_date"),
+                        "season": safe_int(entry.get("season"), 1) if category != "movies" else None,
+                        "episode": safe_int(entry.get("episode"), 1) if category != "movies" else None,
+                        "ep_title": entry.get("episode_title") or entry.get("title", ""),
+                        "date": entry.get("date") or entry.get("air_date") or entry.get("release_date"),
                         "type": category,
                     }
                 )
@@ -273,13 +203,7 @@ def get_calendar_events(user_ids, user_titles):
 def parse_iso_date(date_str):
     if not date_str:
         return None
-    clean_str = (
-        str(date_str)
-        .replace("Z", "")
-        .replace("T", " ")
-        .split("+")[0]
-        .split(".")[0]
-    )
+    clean_str = str(date_str).replace("Z", "").replace("T", " ").split("+")[0].split(".")[0]
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
             return datetime.strptime(clean_str, fmt)
@@ -307,38 +231,30 @@ def generate_ics(events):
         if not dt_start:
             continue
 
-        # Filter out past events aired before yesterday
         if dt_start < now_cutoff:
             continue
 
         dt_end = dt_start + timedelta(minutes=45)
 
-        # Build summary and deduplication key based on show type
-        is_movie = ev.get("type") == "movies" or (
-            ev.get("season") is None and ev.get("episode") is None
-        )
+        is_movie = ev.get("type") == "movies" or (ev.get("season") is None and ev.get("episode") is None)
+        title_safe = clean_string(ev['title'])
 
         if is_movie:
             summary = f"{ev['title']}"
-            dedup_key = (
-                f"movie-{dt_start.strftime('%Y%m%d%H%M')}-{clean_string(ev['title'])[:10]}"
-            )
+            dedup_key = f"movie-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
         else:
             season = safe_int(ev.get("season"), 1)
             episode = safe_int(ev.get("episode"), 1)
             ep_code = f"S{season:02d}E{episode:02d}"
             summary = f"{ev['title']} {ep_code}"
-            # Deduplicate alternate English/Japanese title variations sharing time + S/E numbers
-            dedup_key = f"tv-{dt_start.strftime('%Y%m%d%H%M')}-s{season:02d}e{episode:02d}"
+            dedup_key = f"tv-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}-s{season:02d}e{episode:02d}"
 
         if dedup_key in seen_time_slots:
             continue
         seen_time_slots.add(dedup_key)
 
-        description = (
-            ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
-        )
-        uid_str = clean_string(f"{summary}-{dt_start.strftime('%Y%m%d%H%M')}")
+        description = ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
+        uid_str = f"{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
 
         dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -362,12 +278,11 @@ def generate_ics(events):
 
 
 def update_gist(ics_content):
-    """Publish generated .ics content directly to GitHub Gist."""
     url = f"https://api.github.com/gists/{GIST_ID}"
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/4.0",
+        "User-Agent": "SimklCalendarExporter/4.1",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
@@ -377,9 +292,7 @@ def update_gist(ics_content):
         }
     ).encode("utf-8")
 
-    req = urllib.request.Request(
-        url, data=payload, headers=headers, method="PATCH"
-    )
+    req = urllib.request.Request(url, data=payload, headers=headers, method="PATCH")
     try:
         with urllib.request.urlopen(req) as response:
             if response.status == 200:
