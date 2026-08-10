@@ -2,16 +2,13 @@ import json
 import os
 import re
 import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 
-# ==========================================
-# SECRETS & ENVIRONMENT VARIABLES
-# ==========================================
 SIMKL_CLIENT_ID = os.environ.get("SIMKL_CLIENT_ID")
 SIMKL_ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
 GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
-# ==========================================
 
 
 def safe_int(val, default=1):
@@ -24,15 +21,20 @@ def safe_int(val, default=1):
 
 
 def fetch_json(url, headers=None):
+    """Now logs WHY a fetch failed instead of silently returning None."""
     if headers is None:
         headers = {}
     headers["User-Agent"] = "SimklCalendarExporter/4.2"
 
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except urllib.error.HTTPError as e:
+        print(f"    [!] HTTP {e.code} fetching {url}: {e.reason}")
+        return None
+    except Exception as e:
+        print(f"    [!] Error fetching {url}: {type(e).__name__}: {e}")
         return None
 
 
@@ -47,20 +49,13 @@ def extract_all_ids(obj):
     if not isinstance(obj, dict):
         return ids
 
-    targets = [
-        obj,
-        obj.get("show"),
-        obj.get("anime"),
-        obj.get("movie"),
-        obj.get("ids"),
-    ]
+    targets = [obj, obj.get("show"), obj.get("anime"), obj.get("movie"), obj.get("ids")]
     for t in targets:
         if isinstance(t, dict):
-            for k in ["simkl", "simkl_id", "tvdb", "tvdb_id", "imdb", "tmdb", "mal"]:
+            for k in ["simkl", "simkl_id", "tvdb", "tvdb_id", "imdb", "imdb_id", "tmdb", "tmdb_id", "mal", "mal_id"]:
                 val = t.get(k)
                 if val is not None and str(val).strip() not in ("", "0", "None", "null"):
                     ids.add(str(val))
-
             ids_dict = t.get("ids")
             if isinstance(ids_dict, dict):
                 for val in ids_dict.values():
@@ -69,27 +64,37 @@ def extract_all_ids(obj):
     return ids
 
 
+# category -> the key Simkl nests the media object under
+CATEGORY_KEY = {"shows": "show", "anime": "anime", "movies": "movie"}
+
+
 def get_user_watchlist():
+    """Fetch active watchlist items, kept SEPARATE per category so an anime
+    title/id can never accidentally match a show/movie calendar entry."""
     headers = {
         "Authorization": f"Bearer {SIMKL_ACCESS_TOKEN}",
         "simkl-api-key": SIMKL_CLIENT_ID,
     }
 
-    user_ids = set()
-    user_titles = set()
+    user_ids = {"shows": set(), "anime": set(), "movies": set()}
+    user_titles = {"shows": set(), "anime": set(), "movies": set()}
     direct_events = []
 
-    ALLOWED_STATUSES = {"watching", "plantowatch", "plan to watch", "hold"}
+    ALLOWED_STATUSES = {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold"}
 
     for category in ["shows", "anime", "movies"]:
         url = f"https://api.simkl.com/sync/all-items/{category}?next_watch_info=yes"
         print(f"[*] Fetching watchlist for: {category}...")
-        data = fetch_json(url, headers=headers)
+        data = fetch_json(url, headers=dict(headers))
 
         if not data:
+            print(f"    [!] No data returned for {category} watchlist - check token/scopes.")
             continue
 
         items = data.get(category, []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        print(f"    [debug] raw item count for {category}: {len(items)}")
+        if items:
+            print(f"    [debug] sample keys: {list(items[0].keys())}")
 
         active_count = 0
         for item in items:
@@ -98,68 +103,39 @@ def get_user_watchlist():
                 continue
 
             active_count += 1
-            show_obj = item.get("show") or item.get("anime") or item.get("movie") or item
+            nested_key = CATEGORY_KEY[category]
+            show_obj = item.get(nested_key) or item.get("show") or item.get("anime") or item.get("movie") or item
+
+            user_ids[category].update(extract_all_ids(show_obj))
             raw_title = show_obj.get("title", "")
-
-            # Extract strict Simkl ID to prevent duplicate English/Romaji outputs
-            simkl_id = ""
-            if isinstance(show_obj, dict) and "ids" in show_obj:
-                simkl_id = show_obj["ids"].get("simkl", "")
-            if not simkl_id and "ids" in item:
-                simkl_id = item["ids"].get("simkl", "")
-            if not simkl_id:
-                simkl_id = clean_string(raw_title)
-
-            extracted_ids = extract_all_ids(show_obj)
-            user_ids.update(extracted_ids)
-
             cleaned = clean_string(raw_title)
             if cleaned:
-                user_titles.add(cleaned)
+                user_titles[category].add(cleaned)
 
-            # Movies lack next_to_watch_info endpoints; parse release directly
-            if category == "movies":
-                ep_date = None
-                if isinstance(show_obj, dict):
-                    ep_date = show_obj.get("release_date") or show_obj.get("date")
-                if not ep_date:
-                    ep_date = item.get("release_date")
-                
+            next_info = item.get("next_to_watch_info")
+            if next_info and isinstance(next_info, dict):
+                ep_date = next_info.get("date") or next_info.get("release_date")
                 if ep_date:
                     direct_events.append(
                         {
                             "title": raw_title or "Title",
-                            "season": None,
-                            "episode": None,
-                            "ep_title": "Movie Release",
+                            "season": safe_int(next_info.get("season"), 1) if category != "movies" else None,
+                            "episode": safe_int(next_info.get("episode"), 1) if category != "movies" else None,
+                            "ep_title": next_info.get("title", ""),
                             "date": ep_date,
                             "type": category,
-                            "simkl_id": str(simkl_id),
                         }
                     )
-            else:
-                next_info = item.get("next_to_watch_info")
-                if next_info and isinstance(next_info, dict):
-                    ep_date = next_info.get("date") or next_info.get("release_date")
-                    if ep_date:
-                        direct_events.append(
-                            {
-                                "title": raw_title or "Title",
-                                "season": safe_int(next_info.get("season"), 1),
-                                "episode": safe_int(next_info.get("episode"), 1),
-                                "ep_title": next_info.get("title", ""),
-                                "date": ep_date,
-                                "type": category,
-                                "simkl_id": str(simkl_id),
-                            }
-                        )
 
-        print(f"    Found {active_count} active items in {category}.")
+        print(f"    Found {active_count} active items in {category}. "
+              f"({len(user_ids[category])} ids, {len(user_titles[category])} titles indexed)")
 
     return user_ids, user_titles, direct_events
 
 
 def get_calendar_events(user_ids, user_titles):
+    """Scan calendar feeds. Each feed is matched ONLY against the watchlist
+    ids/titles for its own category (shows vs anime vs movies)."""
     now = datetime.utcnow()
     current_year = now.year
     current_month = now.month
@@ -183,40 +159,48 @@ def get_calendar_events(user_ids, user_titles):
         print(f"[*] Scanning feed: {url}...")
         feed = fetch_json(url)
         if not feed or not isinstance(feed, list):
+            print(f"    [!] Feed returned nothing usable - see error above (or empty list).")
             continue
+
+        print(f"    [debug] feed has {len(feed)} entries")
+        if feed:
+            print(f"    [debug] sample entry keys: {list(feed[0].keys())}")
+
+        nested_key = CATEGORY_KEY[category]
+        cat_ids = user_ids[category]
+        cat_titles = user_titles[category]
 
         feed_matches = 0
         for entry in feed:
             entry_ids = extract_all_ids(entry)
-            show_obj = entry.get("show") if isinstance(entry.get("show"), dict) else {}
-            entry_title = (
-                entry.get("show_title") or entry.get("anime_title") or entry.get("movie_title")
-                or show_obj.get("title") or entry.get("title", "")
-            )
-            
-            simkl_id = ""
-            if isinstance(entry.get("ids"), dict):
-                simkl_id = entry["ids"].get("simkl", "")
-            if not simkl_id and isinstance(show_obj, dict) and "ids" in show_obj:
-                simkl_id = show_obj["ids"].get("simkl", "")
-            if not simkl_id:
-                simkl_id = clean_string(entry_title)
 
+            nested_obj = entry.get(nested_key)
+            if not isinstance(nested_obj, dict):
+                nested_obj = entry.get("show") if isinstance(entry.get("show"), dict) else {}
+
+            entry_title = (
+                entry.get(f"{nested_key}_title")
+                or entry.get("show_title")
+                or entry.get("anime_title")
+                or entry.get("movie_title")
+                or nested_obj.get("title")
+                or entry.get("title", "")
+            )
             cleaned_entry_title = clean_string(entry_title)
-            id_match = bool(entry_ids & user_ids)
-            title_match = cleaned_entry_title in user_titles if cleaned_entry_title else False
+
+            id_match = bool(entry_ids & cat_ids)
+            title_match = cleaned_entry_title in cat_titles if cleaned_entry_title else False
 
             if id_match or title_match:
                 feed_matches += 1
                 matched_events.append(
                     {
                         "title": entry_title or "Title",
-                        "season": safe_int(entry.get("season"), 1) if category != "movies" else None,
-                        "episode": safe_int(entry.get("episode"), 1) if category != "movies" else None,
+                        "season": safe_int(entry.get("season") or nested_obj.get("season"), 1) if category != "movies" else None,
+                        "episode": safe_int(entry.get("episode") or nested_obj.get("episode"), 1) if category != "movies" else None,
                         "ep_title": entry.get("episode_title") or entry.get("title", ""),
                         "date": entry.get("date") or entry.get("air_date") or entry.get("release_date"),
                         "type": category,
-                        "simkl_id": str(simkl_id),
                     }
                 )
 
@@ -253,33 +237,31 @@ def generate_ics(events):
 
     for ev in events:
         dt_start = parse_iso_date(ev.get("date"))
-        if not dt_start or dt_start < now_cutoff:
+        if not dt_start:
+            continue
+        if dt_start < now_cutoff:
             continue
 
         dt_end = dt_start + timedelta(minutes=45)
-        sid = ev.get("simkl_id", clean_string(ev['title']))
         is_movie = ev.get("type") == "movies" or (ev.get("season") is None and ev.get("episode") is None)
+        title_safe = clean_string(ev["title"])
 
-        # Utilize simkl_id for perfect duplicate collision across languages
         if is_movie:
             summary = f"{ev['title']}"
-            dedup_key = f"movie-{sid}"
+            dedup_key = f"movie-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
         else:
             season = safe_int(ev.get("season"), 1)
             episode = safe_int(ev.get("episode"), 1)
             ep_code = f"S{season:02d}E{episode:02d}"
             summary = f"{ev['title']} {ep_code}"
-            dedup_key = f"tv-{sid}-s{season:02d}e{episode:02d}"
+            dedup_key = f"tv-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}-s{season:02d}e{episode:02d}"
 
         if dedup_key in seen_time_slots:
             continue
         seen_time_slots.add(dedup_key)
 
         description = ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
-        
-        # Clean UID string to comply strictly with ICS format
-        uid_clean = re.sub(r"[^a-z0-9\-]", "", str(dedup_key).lower())
-        uid_str = f"{uid_clean}@{dt_start.strftime('%Y%m%d')}"
+        uid_str = f"{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
 
         dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -311,10 +293,7 @@ def update_gist(ics_content):
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
-        {
-            "description": "Updated Simkl TV Calendar",
-            "files": {"trakt.ics": {"content": ics_content}},
-        }
+        {"description": "Updated Simkl TV Calendar", "files": {"trakt.ics": {"content": ics_content}}}
     ).encode("utf-8")
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="PATCH")
@@ -330,8 +309,7 @@ def update_gist(ics_content):
 
 def main():
     missing = [
-        var
-        for var, val in [
+        var for var, val in [
             ("SIMKL_CLIENT_ID", SIMKL_CLIENT_ID),
             ("SIMKL_ACCESS_TOKEN", SIMKL_ACCESS_TOKEN),
             ("GIST_ID", GIST_ID),
@@ -339,7 +317,6 @@ def main():
         ]
         if not val
     ]
-
     if missing:
         print(f"❌ ERROR: Missing required GitHub Secrets: {', '.join(missing)}")
         exit(1)
