@@ -1,50 +1,59 @@
-from datetime import datetime, timedelta
-import json
 import os
+import json
+import re
 import urllib.request
+from datetime import datetime, timedelta
 
 # ==========================================
-# CONFIGURATION
+# SECRETS & ENVIRONMENT VARIABLES
 # ==========================================
-SIMKL_CLIENT_ID = "24f203f7e590f4cc9fb9813291ca278c9c9caced016536314f3fe24dd00d7b8f"  # Replace with your Simkl API Client ID
-SIMKL_ACCESS_TOKEN = (
-    "9d9396b283276f309b98ea67f4dcfdf8f371229d45a11363e0bd74f837c60bdc"  # Replace with your User Access Token
-)
-OUTPUT_FILENAME = "simkl_tv_calendar.ics"
+SIMKL_CLIENT_ID = os.environ.get("SIMKL_CLIENT_ID")
+SIMKL_ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
+GIST_ID = os.environ.get("GIST_ID")
+GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 # ==========================================
 
 
 def fetch_json(url, headers=None):
-    """Utility function to make HTTP GET requests and parse JSON."""
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/1.0"
+    headers["User-Agent"] = "SimklCalendarExporter/2.0"
 
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req) as response:
             return json.loads(response.read().decode("utf-8"))
     except Exception as e:
-        print(f"[!] Error fetching {url}: {e}")
         return None
 
 
-def extract_simkl_ids(item):
-    """Safely extract simkl ID as an integer from various item formats."""
-    if not isinstance(item, dict):
-        return None
+def clean_string(text):
+    """Normalize text for fuzzy title matching."""
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
 
-    # Handle wrapped structures: {"show": {"ids": ...}} or {"ids": ...}
-    target = item.get("show") or item.get("anime") or item
-    ids = target.get("ids", {})
 
-    simkl_id = ids.get("simkl")
-    if simkl_id is not None:
-        try:
-            return int(simkl_id)
-        except (ValueError, TypeError):
-            pass
-    return None
+def extract_all_ids(obj):
+    """Extract all possible Simkl, TVDB, and IMDb IDs from any object structure."""
+    ids = set()
+    if not isinstance(obj, dict):
+        return ids
+
+    targets = [obj, obj.get("show"), obj.get("anime"), obj.get("ids")]
+    for t in targets:
+        if isinstance(t, dict):
+            for k in ["simkl", "simkl_id", "tvdb", "tvdb_id", "imdb", "tmdb", "mal"]:
+                val = t.get(k)
+                if val:
+                    ids.add(str(val))
+
+            ids_dict = t.get("ids")
+            if isinstance(ids_dict, dict):
+                for val in ids_dict.values():
+                    if val:
+                        ids.add(str(val))
+    return ids
 
 
 def get_user_watchlist():
@@ -54,106 +63,116 @@ def get_user_watchlist():
         "simkl-api-key": SIMKL_CLIENT_ID,
     }
 
-    watchlist_ids = set()
+    user_ids = set()
+    user_titles = set()
     direct_events = []
 
-    # Fetch both shows and anime watchlists
-    categories = ["shows", "anime"]
-
-    for category in categories:
+    for category in ["shows", "anime"]:
         url = f"https://api.simkl.com/sync/all-items/{category}?next_watch_info=yes"
-        print(f"[*] Fetching user watchlist for: {category}...")
+        print(f"[*] Fetching watchlist for: {category}...")
         data = fetch_json(url, headers=headers)
 
         if not data:
             continue
 
-        # Unnest items list from wrapper key if present
         items = (
             data.get(category, [])
             if isinstance(data, dict)
             else (data if isinstance(data, list) else [])
         )
-        print(f"    Found {len(items)} items in {category} watchlist.")
+        print(f"    Found {len(items)} items in {category}.")
 
         for item in items:
-            sid = extract_simkl_ids(item)
-            if sid:
-                watchlist_ids.add(sid)
+            show_obj = item.get("show") or item.get("anime") or item
 
-            # Check if Simkl directly returned 'next_to_watch_info'
+            extracted_ids = extract_all_ids(show_obj)
+            user_ids.update(extracted_ids)
+
+            raw_title = show_obj.get("title", "")
+            cleaned = clean_string(raw_title)
+            if cleaned:
+                user_titles.add(cleaned)
+
             next_info = item.get("next_to_watch_info")
             if next_info and isinstance(next_info, dict):
-                show_obj = item.get("show") or item.get("anime") or {}
-                title = show_obj.get("title", "TV Show")
                 ep_date = next_info.get("date")
-                season = next_info.get("season", 1)
-                episode = next_info.get("episode", 1)
-                ep_title = next_info.get("title", "")
-
                 if ep_date:
                     direct_events.append(
                         {
-                            "title": title,
-                            "season": season,
-                            "episode": episode,
-                            "ep_title": ep_title,
+                            "title": raw_title or "TV Show",
+                            "season": next_info.get("season", 1),
+                            "episode": next_info.get("episode", 1),
+                            "ep_title": next_info.get("title", ""),
                             "date": ep_date,
-                            "simkl_id": sid,
                         }
                     )
 
-    return watchlist_ids, direct_events
+    return user_ids, user_titles, direct_events
 
 
-def get_global_calendar_events(watchlist_ids):
-    """Fetch global Simkl 33-day calendar feeds and filter by user watchlist."""
+def get_calendar_events(user_ids, user_titles):
+    """Scan rolling and monthly calendar JSON files for matching user shows."""
+    now = datetime.utcnow()
+    current_year = now.year
+    current_month = now.month
+
+    next_month_dt = (now.replace(day=28) + timedelta(days=4)).replace(day=1)
+
     calendar_urls = [
         "https://data.simkl.in/calendar/tv.json",
         "https://data.simkl.in/calendar/anime.json",
+        f"https://data.simkl.in/calendar/{current_year}/{current_month}/tv.json",
+        f"https://data.simkl.in/calendar/{current_year}/{current_month}/anime.json",
+        f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/tv.json",
+        f"https://data.simkl.in/calendar/{next_month_dt.year}/{next_month_dt.month}/anime.json",
     ]
 
-    calendar_events = []
+    matched_events = []
 
     for url in calendar_urls:
-        print(f"[*] Fetching global calendar feed from {url}...")
+        print(f"[*] Scanning feed: {url}...")
         feed = fetch_json(url)
         if not feed or not isinstance(feed, list):
             continue
 
-        matched_count = 0
+        feed_matches = 0
         for entry in feed:
-            sid = extract_simkl_ids(entry)
-            if sid in watchlist_ids:
-                matched_count += 1
-                calendar_events.append(
+            entry_ids = extract_all_ids(entry)
+            entry_title = entry.get("title") or entry.get("show_title", "")
+            cleaned_entry_title = clean_string(entry_title)
+
+            id_match = bool(entry_ids & user_ids)
+            title_match = cleaned_entry_title in user_titles or any(
+                ut in cleaned_entry_title for ut in user_titles if len(ut) > 4
+            )
+
+            if id_match or title_match:
+                feed_matches += 1
+                matched_events.append(
                     {
-                        "title": entry.get("title", "TV Show"),
+                        "title": entry_title or "TV Show",
                         "season": entry.get("season", 1),
                         "episode": entry.get("episode", 1),
                         "ep_title": entry.get("episode_title")
                         or entry.get("title", ""),
-                        "date": entry.get("date"),
-                        "simkl_id": sid,
+                        "date": entry.get("date")
+                        or entry.get("air_date")
+                        or entry.get("release_date"),
                     }
                 )
-        print(f"    Matched {matched_count} upcoming episodes.")
 
-    return calendar_events
+        print(f"    Matched {feed_matches} entries.")
+
+    return matched_events
 
 
 def parse_iso_date(date_str):
-    """Parse ISO date string into a datetime object."""
     if not date_str:
         return None
-    # Strip fractional seconds/timezones if needed for simple parsing
     clean_str = (
-        date_str.replace("Z", "+00:00")
-        .replace(" ", "T")
-        .split("+")[0]
-        .split(".")[0]
+        date_str.replace("Z", "").replace("T", " ").split("+")[0].split(".")[0]
     )
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
             return datetime.strptime(clean_str, fmt)
         except ValueError:
@@ -161,8 +180,7 @@ def parse_iso_date(date_str):
     return None
 
 
-def generate_ics(events, filename):
-    """Generate .ics file from gathered episode events."""
+def generate_ics(events):
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -182,26 +200,21 @@ def generate_ics(events, filename):
 
         dt_end = dt_start + timedelta(minutes=45)
 
-        s_str = f"S{ev['season']:02d}" if ev.get("season") else ""
-        e_str = f"E{ev['episode']:02d}" if ev.get("episode") else ""
-        ep_code = f"{s_str}{e_str}".strip()
+        season = ev.get("season", 1)
+        episode = ev.get("episode", 1)
+        ep_code = f"S{season:02d}E{episode:02d}"
 
-        summary = (
-            f"{ev['title']} {ep_code}".strip()
-            if ep_code
-            else f"{ev['title']}"
-        )
+        summary = f"{ev['title']} {ep_code}"
         description = (
-            f"{ev['ep_title']}"
-            if ev.get("ep_title")
-            else f"New episode of {ev['title']}"
+            ev["ep_title"] if ev.get("ep_title") else f"Episode {ep_code}"
         )
 
-        uid = f"simkl-{ev.get('simkl_id', '0')}-{ep_code}-{dt_start.strftime('%Y%m%d%H%M')}@simkl"
-
-        if uid in seen_uids:
+        uid_raw = clean_string(
+            f"{ev['title']}-{ep_code}-{dt_start.strftime('%Y%m%d%H%M')}"
+        )
+        if uid_raw in seen_uids:
             continue
-        seen_uids.add(uid)
+        seen_uids.add(uid_raw)
 
         dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -210,7 +223,7 @@ def generate_ics(events, filename):
         lines.extend(
             [
                 "BEGIN:VEVENT",
-                f"UID:{uid}",
+                f"UID:{uid_raw}@simkl",
                 f"DTSTAMP:{dtstamp}",
                 f"DTSTART:{str_start}",
                 f"DTEND:{str_end}",
@@ -221,31 +234,63 @@ def generate_ics(events, filename):
         )
 
     lines.append("END:VCALENDAR")
+    return "\n".join(lines), len(seen_uids)
 
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
 
-    print(
-        f"\n[+] Successfully generated '{filename}' with {len(seen_uids)} episode events."
+def update_gist(ics_content):
+    """Publish generated .ics content directly to your GitHub Gist."""
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "SimklCalendarExporter/2.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    payload = json.dumps(
+        {
+            "description": "Updated Simkl TV Calendar",
+            "files": {"trakt.ics": {"content": ics_content}},
+        }
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        url, data=payload, headers=headers, method="PATCH"
     )
+    try:
+        with urllib.request.urlopen(req) as response:
+            if response.status == 200:
+                print("\n✅ SUCCESS: trakt.ics updated in GitHub Gist!")
+            else:
+                print(f"\n❌ Failed to update Gist. Status code: {response.status}")
+    except Exception as e:
+        print(f"\n❌ Error updating Gist: {e}")
 
 
 def main():
-    if (
-        SIMKL_CLIENT_ID == "YOUR_SIMKL_CLIENT_ID"
-        or SIMKL_ACCESS_TOKEN == "YOUR_SIMKL_ACCESS_TOKEN"
-    ):
-        print(
-            "[!] Please set your SIMKL_CLIENT_ID and SIMKL_ACCESS_TOKEN at the top of the script."
-        )
-        return
+    # Verify environment secrets exist
+    missing = [
+        var
+        for var, val in [
+            ("SIMKL_CLIENT_ID", SIMKL_CLIENT_ID),
+            ("SIMKL_ACCESS_TOKEN", SIMKL_ACCESS_TOKEN),
+            ("GIST_ID", GIST_ID),
+            ("GH_PAT_TOKEN / GIST_TOKEN", GH_TOKEN),
+        ]
+        if not val
+    ]
 
-    watchlist_ids, direct_events = get_user_watchlist()
-    calendar_events = get_global_calendar_events(watchlist_ids)
+    if missing:
+        print(f"❌ ERROR: Missing required GitHub Secrets: {', '.join(missing)}")
+        exit(1)
 
-    # Combine events from both sources
+    user_ids, user_titles, direct_events = get_user_watchlist()
+    calendar_events = get_calendar_events(user_ids, user_titles)
+
     all_events = direct_events + calendar_events
-    generate_ics(all_events, OUTPUT_FILENAME)
+    ics_content, event_count = generate_ics(all_events)
+
+    print(f"\n[+] Generated calendar with {event_count} total upcoming events.")
+    update_gist(ics_content)
 
 
 if __name__ == "__main__":
