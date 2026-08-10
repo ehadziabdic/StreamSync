@@ -104,6 +104,7 @@ def get_user_watchlist():
                 user_titles[category].add(cleaned)
 
             if category == "movies":
+                simkl_id = None
                 ids_dict = show_obj.get("ids") if isinstance(show_obj.get("ids"), dict) else {}
                 simkl_id = ids_dict.get("simkl") or ids_dict.get("simkl_id")
                 if simkl_id:
@@ -197,14 +198,47 @@ def get_calendar_events(user_ids, user_titles):
     return matched_events
 
 
+# Candidate field names for a movie's release date, tried in order.
 RELEASE_DATE_FIELDS = [
     "release_date",
     "theater_release_date",
     "theater_date",
     "us_release_date",
     "digital_release_date",
-    "date",
 ]
+
+
+def extract_from_release_dates(release_dates, released_fallback):
+    """release_dates is usually a list of per-country/type release entries,
+    e.g. [{"country": "us", "type": "theatrical", "date": "2026-12-18T00:00:00Z"}, ...]
+    Prefer a US entry, else the earliest date found. Falls back to `released`."""
+    candidates = []
+
+    if isinstance(release_dates, list):
+        for entry in release_dates:
+            if not isinstance(entry, dict):
+                continue
+            d = entry.get("date") or entry.get("release_date")
+            if d:
+                candidates.append((entry.get("country", ""), entry.get("type", ""), d))
+    elif isinstance(release_dates, dict):
+        for country, val in release_dates.items():
+            if isinstance(val, str):
+                candidates.append((country, "", val))
+            elif isinstance(val, dict) and val.get("date"):
+                candidates.append((country, val.get("type", ""), val["date"]))
+            elif isinstance(val, list):
+                for entry in val:
+                    if isinstance(entry, dict) and entry.get("date"):
+                        candidates.append((country, entry.get("type", ""), entry["date"]))
+
+    if not candidates:
+        return released_fallback, "released (fallback)"
+
+    us_candidates = [c for c in candidates if str(c[0]).lower() in ("us", "usa", "united states")]
+    pool = us_candidates or candidates
+    pool.sort(key=lambda c: parse_iso_date(c[2]) or datetime.max)
+    return pool[0][2], f"release_dates[{pool[0][0]}/{pool[0][1]}]"
 
 
 def get_movie_events(watchlist_movies):
@@ -232,9 +266,13 @@ def get_movie_events(watchlist_movies):
                 break
 
         if not date_val:
-            date_keys = [k for k in data.keys() if "date" in k.lower() or "release" in k.lower()]
-            print(f"    [!] No known release-date field populated. "
-                  f"Date-like keys in response: {date_keys or 'none'}")
+            date_val, used_field = extract_from_release_dates(
+                data.get("release_dates"), data.get("released")
+            )
+
+        if not date_val:
+            print(f"    [!] Still no usable date. Raw release_dates: {data.get('release_dates')!r}, "
+                  f"released: {data.get('released')!r}")
             continue
 
         print(f"    [debug] using field '{used_field}' = {date_val}")
