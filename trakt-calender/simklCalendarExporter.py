@@ -42,7 +42,16 @@ def clean_string(text):
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
+# normalize provider-key variants (tvdb / tvdb_id) to one canonical name
+PROVIDER_ALIASES = {
+    "simkl_id": "simkl", "tvdb_id": "tvdb", "imdb_id": "imdb",
+    "tmdb_id": "tmdb", "mal_id": "mal",
+}
+
+
 def extract_all_ids(obj):
+    """Returns provider-namespaced ids like 'tvdb:12345' so a tvdb id can
+    never be confused with an unrelated mal/tmdb id that has the same number."""
     ids = set()
     if not isinstance(obj, dict):
         return ids
@@ -52,17 +61,23 @@ def extract_all_ids(obj):
             for k in ["simkl", "simkl_id", "tvdb", "tvdb_id", "imdb", "imdb_id", "tmdb", "tmdb_id", "mal", "mal_id"]:
                 val = t.get(k)
                 if val is not None and str(val).strip() not in ("", "0", "None", "null"):
-                    ids.add(str(val))
+                    provider = PROVIDER_ALIASES.get(k, k)
+                    ids.add(f"{provider}:{val}")
             ids_dict = t.get("ids")
             if isinstance(ids_dict, dict):
-                for val in ids_dict.values():
+                for provider, val in ids_dict.items():
                     if val is not None and str(val).strip() not in ("", "0", "None", "null"):
-                        ids.add(str(val))
+                        provider = PROVIDER_ALIASES.get(provider, provider)
+                        ids.add(f"{provider}:{val}")
     return ids
 
 
 CATEGORY_KEY = {"shows": "show", "anime": "anime", "movies": "movie"}
-ALLOWED_STATUSES = {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold"}
+ALLOWED_STATUSES = {
+    "shows": {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold", "completed"},
+    "anime": {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold", "completed"},
+    "movies": {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold"},
+}
 
 
 def get_user_watchlist():
@@ -89,7 +104,7 @@ def get_user_watchlist():
         active_count = 0
         for item in items:
             status = str(item.get("status", "")).lower()
-            if status not in ALLOWED_STATUSES:
+            if status not in ALLOWED_STATUSES[category]:
                 continue
 
             active_count += 1
