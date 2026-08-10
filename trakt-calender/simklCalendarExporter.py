@@ -23,7 +23,7 @@ def safe_int(val, default=1):
 def fetch_json(url, headers=None):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/4.3"
+    headers["User-Agent"] = "SimklCalendarExporter/4.4"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
@@ -139,6 +139,10 @@ def get_user_watchlist():
                             "ep_title": next_info.get("title", ""),
                             "date": ep_date,
                             "type": category,
+                            # NOTE: carry the watchlist item's own ids through, so this
+                            # event can be recognized as a duplicate of a calendar-feed
+                            # match for the same underlying show.
+                            "ids": item_ids,
                         }
                     )
 
@@ -205,6 +209,12 @@ def get_calendar_events(user_ids, user_titles):
                         "ep_title": entry.get("episode_title") or entry.get("title", ""),
                         "date": entry.get("date") or entry.get("air_date") or entry.get("release_date"),
                         "type": category,
+                        # Full id set for this feed entry (simkl/tvdb/mal/imdb/tmdb).
+                        # This is what lets us recognize the SAME show being matched
+                        # via two different feeds/categories under two different
+                        # display titles (e.g. tv.json's English title vs anime.json's
+                        # romaji title for the same series).
+                        "ids": entry_ids,
                     }
                 )
 
@@ -291,6 +301,11 @@ def get_movie_events(watchlist_movies):
             continue
 
         print(f"    [debug] using field '{used_field}' = {date_val}")
+
+        # Pull ids from the full movie payload too, plus the simkl id we already know.
+        movie_ids = extract_all_ids(data)
+        movie_ids.add(f"simkl:{movie['simkl_id']}")
+
         events.append(
             {
                 "title": movie["title"],
@@ -299,6 +314,7 @@ def get_movie_events(watchlist_movies):
                 "ep_title": "",
                 "date": date_val,
                 "type": "movies",
+                "ids": movie_ids,
             }
         )
 
@@ -317,6 +333,77 @@ def parse_iso_date(date_str):
     return None
 
 
+def merge_duplicate_events(events):
+    """Collapse events that refer to the same underlying episode/movie even when
+    they were sourced from different feeds/categories under different display
+    titles (e.g. an anime matched via both the general tv.json feed and the
+    anime.json feed, or a show tracked as both 'show' and 'anime' in Simkl).
+
+    Two events are considered the same if they share a season+episode (or are
+    both movies) AND either share at least one provider id, or have an
+    identical normalized title. Union-find groups all matches transitively,
+    then we keep one representative per group (preferring the one that has a
+    resolvable date and, as a tiebreaker, an actual episode title)."""
+    n = len(events)
+    if n == 0:
+        return events
+
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def bucket_key_of(ev):
+        is_movie = ev.get("type") == "movies" or (ev.get("season") is None and ev.get("episode") is None)
+        if is_movie:
+            return ("movie",)
+        return ("tv", safe_int(ev.get("season"), 1), safe_int(ev.get("episode"), 1))
+
+    buckets = {}
+    for i, ev in enumerate(events):
+        buckets.setdefault(bucket_key_of(ev), []).append(i)
+
+    for idxs in buckets.values():
+        for a_pos in range(len(idxs)):
+            for b_pos in range(a_pos + 1, len(idxs)):
+                i, j = idxs[a_pos], idxs[b_pos]
+                ids_i = events[i].get("ids") or set()
+                ids_j = events[j].get("ids") or set()
+                same_title = clean_string(events[i]["title"]) == clean_string(events[j]["title"])
+                shares_id = bool(ids_i and ids_j and (ids_i & ids_j))
+                if shares_id or same_title:
+                    union(i, j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    merged = []
+    for idxs in groups.values():
+        best = None
+        for i in idxs:
+            ev = events[i]
+            if not parse_iso_date(ev.get("date")):
+                continue
+            if best is None:
+                best = ev
+            elif not best.get("ep_title") and ev.get("ep_title"):
+                best = ev
+        if best is None:
+            best = events[idxs[0]]
+        merged.append(best)
+
+    return merged
+
+
 def generate_ics(events):
     lines = [
         "BEGIN:VCALENDAR",
@@ -328,7 +415,7 @@ def generate_ics(events):
         "METHOD:PUBLISH",
     ]
 
-    seen_time_slots = set()
+    seen_keys = set()
     now_cutoff = datetime.utcnow() - timedelta(days=1)
 
     for ev in events:
@@ -342,22 +429,29 @@ def generate_ics(events):
         is_movie = ev.get("type") == "movies" or (ev.get("season") is None and ev.get("episode") is None)
         title_safe = clean_string(ev["title"])
 
+        # Prefer a stable provider id for the dedup/UID key (simkl's own id is
+        # universal across a show's "shows" and "anime" list entries, so it's
+        # the most reliable). Fall back to title text only if no id is present.
+        ids = ev.get("ids") or set()
+        canonical_id = next((i for i in ids if i.startswith("simkl:")), None) or (sorted(ids)[0] if ids else None)
+        key_id = canonical_id or title_safe
+
         if is_movie:
             summary = f"{ev['title']}"
-            dedup_key = f"movie-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
+            dedup_key = f"movie-{key_id}"
         else:
             season = safe_int(ev.get("season"), 1)
             episode = safe_int(ev.get("episode"), 1)
             ep_code = f"S{season:02d}E{episode:02d}"
             summary = f"{ev['title']} {ep_code}"
-            dedup_key = f"tv-{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}-s{season:02d}e{episode:02d}"
+            dedup_key = f"tv-{key_id}-s{season:02d}e{episode:02d}"
 
-        if dedup_key in seen_time_slots:
+        if dedup_key in seen_keys:
             continue
-        seen_time_slots.add(dedup_key)
+        seen_keys.add(dedup_key)
 
         description = ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
-        uid_str = f"{title_safe}-{dt_start.strftime('%Y%m%d%H%M')}"
+        uid_str = re.sub(r"[^a-zA-Z0-9:_-]", "", dedup_key)
 
         dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -377,7 +471,7 @@ def generate_ics(events):
         )
 
     lines.append("END:VCALENDAR")
-    return "\n".join(lines), len(seen_time_slots)
+    return "\n".join(lines), len(seen_keys)
 
 
 def update_gist(ics_content):
@@ -385,7 +479,7 @@ def update_gist(ics_content):
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/4.3",
+        "User-Agent": "SimklCalendarExporter/4.4",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
@@ -422,7 +516,12 @@ def main():
     movie_events = get_movie_events(watchlist_movies)
 
     all_events = direct_events + calendar_events + movie_events
-    ics_content, event_count = generate_ics(all_events)
+    print(f"\n[*] {len(all_events)} raw event candidates before merge.")
+
+    merged_events = merge_duplicate_events(all_events)
+    print(f"[*] {len(merged_events)} after merging cross-feed duplicates.")
+
+    ics_content, event_count = generate_ics(merged_events)
 
     print(f"\n[+] Generated calendar with {event_count} active upcoming events.")
     update_gist(ics_content)
