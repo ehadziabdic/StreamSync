@@ -2,7 +2,7 @@
 $GITHUB_TOKEN = "your-hithub-token-here"  # Replace with your actual GitHub token
 $GIST_ID = "your-gist-id-here"  # Replace with your actual Gist ID
 $GITHUB_USER = "your-github-username-here"  # Replace with your actual GitHub username
-$GITHUB_REPO = "stremio-redirect"
+$GITHUB_REPO = "StreamSync"
 
 Write-Host "    -> Waiting for network to stabilize..." -ForegroundColor Yellow
 Start-Sleep -Seconds 10
