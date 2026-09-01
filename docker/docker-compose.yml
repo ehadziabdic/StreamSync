@@ -1,0 +1,15 @@
+services:
+  stremio-server:
+    image: stremio/server:latest
+    container_name: stremio-server
+    restart: always
+    environment:
+      - NO_CORS=1
+    volumes:
+      - ./stremio-cache:/root/.stremio-server
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: always
+    command: tunnel --url http://stremio-server:11470
