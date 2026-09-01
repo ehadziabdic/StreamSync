@@ -1,8 +1,8 @@
 <div align="center">
 
-🎬
-
 # StreamSync
+
+![Stream Sync](res/stream_sync.jpg)
 
 **Self-hosted Stremio server with remote access + automatic Simkl watchlist-to-calendar synchronization.**
 
