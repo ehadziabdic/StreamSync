@@ -3,7 +3,7 @@ import os
 import re
 import urllib.request
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 SIMKL_CLIENT_ID = os.environ.get("SIMKL_CLIENT_ID")
 SIMKL_ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
@@ -20,13 +20,13 @@ def safe_int(val, default=1):
         return default
 
 
-def fetch_json(url, headers=None):
+def fetch_json(url, headers=None, timeout=30):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/4.4"
+    headers["User-Agent"] = "SimklCalendarExporter/4.5"
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         print(f"    [!] HTTP {e.code} fetching {url}: {e.reason}")
@@ -161,14 +161,14 @@ def get_user_watchlist():
     return user_ids, user_titles, direct_events, watchlist_movies, watchlist_meta
 
 
-def get_calendar_events(user_ids, user_titles, months_ahead=6):
+def get_calendar_events(user_ids, user_titles, months_ahead=3):
     """Shows + anime only now - these feeds are confirmed working.
 
     months_ahead controls how many calendar months (including the current
     one) get scanned. A show that premieres further out than this window
     simply won't be found here - only in direct_events, if Simkl's watchlist
     API has already populated a next-episode date for it."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     calendar_urls = [
         ("https://data.simkl.in/calendar/tv.json", "shows"),
         ("https://data.simkl.in/calendar/anime.json", "anime"),
@@ -197,12 +197,22 @@ def get_calendar_events(user_ids, user_titles, months_ahead=6):
         cat_ids = user_ids[category]
         cat_titles = user_titles[category]
 
+        # Diagnostic: show what we're matching against
+        sample_ids = sorted(list(cat_ids))[:5]
+        print(f"    Watchlist has {len(cat_ids)} IDs, {len(cat_titles)} titles for '{category}'.")
+        if sample_ids:
+            print(f"    Sample IDs: {sample_ids}")
+
         feed_matches = 0
         for entry in feed:
             entry_ids = extract_all_ids(entry)
             nested_obj = entry.get(nested_key)
             if not isinstance(nested_obj, dict):
                 nested_obj = entry.get("show") if isinstance(entry.get("show"), dict) else {}
+
+            # CDN v1 feeds store episode info inside entry["episode"] as a
+            # dict like {"season": 2, "episode": 20, "url": "..."}.
+            ep_obj = entry.get("episode") if isinstance(entry.get("episode"), dict) else {}
 
             entry_title = (
                 entry.get(f"{nested_key}_title")
@@ -218,12 +228,25 @@ def get_calendar_events(user_ids, user_titles, months_ahead=6):
 
             if id_match or title_match:
                 feed_matches += 1
+                # Season: top-level > nested show obj > CDN episode dict
+                season_val = (
+                    entry.get("season")
+                    or nested_obj.get("season")
+                    or ep_obj.get("season")
+                )
+                # Episode: prefer top-level int/str, then nested obj, then CDN dict
+                ep_raw = entry.get("episode")
+                if isinstance(ep_raw, (int, str)):
+                    episode_val = ep_raw
+                else:
+                    episode_val = nested_obj.get("episode") or ep_obj.get("episode")
+
                 matched_events.append(
                     {
                         "title": entry_title or "Title",
-                        "season": safe_int(entry.get("season") or nested_obj.get("season"), 1),
-                        "episode": safe_int(entry.get("episode") or nested_obj.get("episode"), 1),
-                        "ep_title": entry.get("episode_title") or entry.get("title", ""),
+                        "season": safe_int(season_val, 1),
+                        "episode": safe_int(episode_val, 1),
+                        "ep_title": entry.get("episode_title") or (ep_obj.get("title") if ep_obj else None) or "",
                         "date": entry.get("date") or entry.get("air_date") or entry.get("release_date"),
                         "type": category,
                         # Full id set for this feed entry (simkl/tvdb/mal/imdb/tmdb).
@@ -235,7 +258,7 @@ def get_calendar_events(user_ids, user_titles, months_ahead=6):
                     }
                 )
 
-        print(f"    Matched {feed_matches} entries.")
+        print(f"    Matched {feed_matches} / {len(feed)} entries in {url}.")
 
     return matched_events
 
@@ -290,6 +313,7 @@ def get_movie_events(watchlist_movies):
         "simkl-api-key": SIMKL_CLIENT_ID,
     }
     events = []
+    now_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
 
     for movie in watchlist_movies:
         url = f"https://api.simkl.com/movies/{movie['simkl_id']}?extended=full"
@@ -319,6 +343,12 @@ def get_movie_events(watchlist_movies):
 
         print(f"    [debug] using field '{used_field}' = {date_val}")
 
+        # Skip movies that have already been released
+        dt = parse_iso_date(date_val)
+        if dt and dt < now_cutoff:
+            print(f"    [skip] Already released on {date_val}")
+            continue
+
         # Pull ids from the full movie payload too, plus the simkl id we already know.
         movie_ids = extract_all_ids(data)
         movie_ids.add(f"simkl:{movie['simkl_id']}")
@@ -341,7 +371,11 @@ def get_movie_events(watchlist_movies):
 def parse_iso_date(date_str):
     if not date_str:
         return None
-    clean_str = str(date_str).replace("Z", "").replace("T", " ").split("+")[0].split(".")[0]
+    clean_str = str(date_str).replace("Z", "").replace("T", " ")
+    # Strip timezone offset (+HH:MM or -HH:MM)
+    clean_str = re.sub(r'[+-]\d{2}:\d{2}$', '', clean_str)
+    # Strip milliseconds
+    clean_str = clean_str.split(".")[0]
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
             return datetime.strptime(clean_str, fmt)
@@ -426,7 +460,7 @@ def diagnose_missing(watchlist_meta, merged_events):
     instead of a guess: for every tracked show/anime, say whether it produced
     a future calendar entry, had a date that didn't survive (already past, or
     unparsable), or has no next-episode date from Simkl at all."""
-    now_cutoff = datetime.utcnow() - timedelta(days=1)
+    now_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
 
     event_entries = []
     for ev in merged_events:
@@ -474,7 +508,7 @@ def generate_ics(events):
     ]
 
     seen_keys = set()
-    now_cutoff = datetime.utcnow() - timedelta(days=1)
+    now_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
 
     for ev in events:
         dt_start = parse_iso_date(ev.get("date"))
@@ -511,7 +545,7 @@ def generate_ics(events):
         description = ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
         uid_str = re.sub(r"[^a-zA-Z0-9:_-]", "", dedup_key)
 
-        dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
         str_end = dt_end.strftime("%Y%m%dT%H%M%SZ")
 
@@ -537,7 +571,7 @@ def update_gist(ics_content):
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "SimklCalendarExporter/4.4",
+        "User-Agent": "SimklCalendarExporter/4.5",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = json.dumps(
