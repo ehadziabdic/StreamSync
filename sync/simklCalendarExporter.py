@@ -125,6 +125,21 @@ def normalize_v2_entry(cal_entry, meta, category):
     }
 
 
+def match_normalized_event(ev, user_ids, user_titles):
+    cat = ev.get("type")
+    cat_ids = user_ids.get(cat, set())
+    cat_titles = user_titles.get(cat, set())
+    ids = ev.get("ids") or set()
+    if ids & cat_ids:
+        return True
+    if clean_string(ev.get("title")) in cat_titles:
+        return True
+    for alt in (ev.get("_alt_titles") or []):
+        if clean_string(alt) in cat_titles:
+            return True
+    return False
+
+
 CATEGORY_KEY = {"shows": "show", "anime": "anime", "movies": "movie"}
 ALLOWED_STATUSES = {
     "shows": {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold", "completed"},
@@ -215,37 +230,51 @@ def get_user_watchlist():
 
 
 def get_calendar_events(user_ids, user_titles, months_ahead=3):
-    """Shows + anime only now - these feeds are confirmed working.
+    """Shows + anime + movies via calendar v2 (v1 shape kept as fallback until Feb 2027).
 
     months_ahead controls how many calendar months (including the current
-    one) get scanned. A show that premieres further out than this window
-    simply won't be found here - only in direct_events, if Simkl's watchlist
-    API has already populated a next-episode date for it."""
+    one) get scanned. Monthly files beyond currentMonth+3 return 404 and are
+    skipped via the fetch_json None guard."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     calendar_urls = [
-        ("https://data.simkl.in/calendar/tv.json", "shows"),
-        ("https://data.simkl.in/calendar/anime.json", "anime"),
+        (build_calendar_url("/calendar/v2/tv.json"), "shows"),
+        (build_calendar_url("/calendar/v2/anime.json"), "anime"),
+        (build_calendar_url("/calendar/v2/movie_release.json"), "movies"),
     ]
 
     month_cursor = now.replace(day=1)
     for _ in range(months_ahead):
-        calendar_urls.append(
-            (f"https://data.simkl.in/calendar/{month_cursor.year}/{month_cursor.month}/tv.json", "shows")
-        )
-        calendar_urls.append(
-            (f"https://data.simkl.in/calendar/{month_cursor.year}/{month_cursor.month}/anime.json", "anime")
-        )
+        y, m = month_cursor.year, month_cursor.month
+        calendar_urls.append((build_calendar_url(f"/calendar/v2/{y}/{m}/tv.json"), "shows"))
+        calendar_urls.append((build_calendar_url(f"/calendar/v2/{y}/{m}/anime.json"), "anime"))
+        calendar_urls.append((build_calendar_url(f"/calendar/v2/{y}/{m}/movie_release.json"), "movies"))
         month_cursor = (month_cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
 
     matched_events = []
 
     for url, category in calendar_urls:
-        print(f"[*] Scanning feed: {url}...")
+        print(f"[*] Scanning feed: {url.split('?')[0]}...")
         feed = fetch_json(url)
-        if not feed or not isinstance(feed, list):
+        if not feed:
             print("    [!] Feed returned nothing usable.")
             continue
 
+        if detect_feed_shape(feed) == "v2":
+            calendar, metadata = feed["calendar"], feed["metadata"]
+            feed_matches = 0
+            for cal_entry in calendar:
+                meta = metadata.get(str(cal_entry.get("simkl_id")), {})
+                ev = normalize_v2_entry(cal_entry, meta, category)
+                if ev and match_normalized_event(ev, user_ids, user_titles):
+                    feed_matches += 1
+                    matched_events.append(ev)
+            print(f"    Matched {feed_matches} / {len(calendar)} entries in {url.split('?')[0]}.")
+            continue
+
+        # v1 fallback: legacy flat-list shape (remove after Feb 2027).
+        if not isinstance(feed, list):
+            print("    [!] Feed returned nothing usable.")
+            continue
         nested_key = CATEGORY_KEY[category]
         cat_ids = user_ids[category]
         cat_titles = user_titles[category]
@@ -311,7 +340,7 @@ def get_calendar_events(user_ids, user_titles, months_ahead=3):
                     }
                 )
 
-        print(f"    Matched {feed_matches} / {len(feed)} entries in {url}.")
+        print(f"    Matched {feed_matches} / {len(feed)} entries in {url.split('?')[0]}.")
 
     return matched_events
 

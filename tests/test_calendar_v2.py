@@ -105,5 +105,28 @@ class TestNormalizeV2(unittest.TestCase):
         self.assertEqual(ev["title"], "New Show")
 
 
+class TestCalendarMatching(unittest.TestCase):
+    def test_v2_entry_matches_on_id(self):
+        from simklCalendarExporter import match_normalized_event
+        ev = {"title": "King of the Hill", "season": 15, "episode": 1,
+              "ep_title": "x", "date": "2026-07-20T04:00:00Z", "type": "shows",
+              "ids": {"simkl:3437"}, "_alt_titles": []}
+        self.assertTrue(match_normalized_event(ev, USER_IDS_SAMPLE, USER_TITLES_SAMPLE))
+
+    def test_v2_entry_without_match_returns_false(self):
+        from simklCalendarExporter import match_normalized_event
+        ev = {"title": "Some Unknown Show", "season": 1, "episode": 1,
+              "ep_title": "", "date": "2026-07-20T04:00:00Z", "type": "shows",
+              "ids": {"simkl:99999"}, "_alt_titles": ["Some Unknown Alt"]}
+        self.assertFalse(match_normalized_event(ev, USER_IDS_SAMPLE, USER_TITLES_SAMPLE))
+
+    def test_v2_entry_matches_on_alt_title(self):
+        from simklCalendarExporter import match_normalized_event
+        ev = {"title": "König von Texas", "season": 15, "episode": 1,
+              "ep_title": "", "date": "2026-07-20T04:00:00Z", "type": "shows",
+              "ids": {"simkl:99999"}, "_alt_titles": ["King of the Hill"]}
+        self.assertTrue(match_normalized_event(ev, USER_IDS_SAMPLE, USER_TITLES_SAMPLE))
+
+
 if __name__ == "__main__":
     unittest.main()
