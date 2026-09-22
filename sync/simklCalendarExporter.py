@@ -17,7 +17,7 @@ CALENDAR_BASE = "https://data.simkl.in"
 
 def build_calendar_url(path):
     qs = urllib.parse.urlencode({
-        "client_id": SIMKL_CLIENT_ID or "",
+        "client_id": os.environ.get("SIMKL_CLIENT_ID") or "",
         "app-name": APP_NAME,
         "app-version": APP_VERSION,
     })
