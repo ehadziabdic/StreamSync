@@ -64,5 +64,46 @@ class TestCalendarUrl(unittest.TestCase):
         self.assertIn("User-Agent", seen)
 
 
+class TestNormalizeV2(unittest.TestCase):
+    def test_tv_join_enriches_ids_and_title(self):
+        from simklCalendarExporter import normalize_v2_entry
+        cal = V2_FILE_SAMPLE["calendar"][0]
+        meta = V2_FILE_SAMPLE["metadata"]["3437"]
+        ev = normalize_v2_entry(cal, meta, "shows")
+        self.assertEqual(ev["title"], "King of the Hill")
+        self.assertEqual((ev["season"], ev["episode"]), (15, 1))
+        self.assertEqual(ev["ep_title"], "Failure to Hard Launch")
+        self.assertEqual(ev["date"], "2026-07-20T04:00:00Z")
+        self.assertIn("simkl:3437", ev["ids"])
+        self.assertIn("tvdb:73141", ev["ids"])
+
+    def test_anime_missing_season_defaults_to_1(self):
+        from simklCalendarExporter import normalize_v2_entry
+        cal = {"simkl_id": 1, "date": "2026-07-20T00:00:00Z", "finale_type": None,
+               "episode": {"episode": 148, "title": "Ep 148", "url": "https://simkl.com/x"}}
+        meta = {"title": "Chibi Maruko-chan", "ids": {"simkl_id": 1}}
+        ev = normalize_v2_entry(cal, meta, "anime")
+        self.assertEqual(ev["season"], 1)
+        self.assertEqual(ev["episode"], 148)
+
+    def test_movie_has_no_episode_object(self):
+        from simklCalendarExporter import normalize_v2_entry
+        cal = {"simkl_id": 53536, "date": "2026-12-18T00:00:00Z", "finale_type": None}
+        meta = {"title": "Ghost in the Shell", "ids": {"simkl_id": 53536, "imdb": "tt0113568"}}
+        ev = normalize_v2_entry(cal, meta, "movies")
+        self.assertIsNone(ev["season"])
+        self.assertIsNone(ev["episode"])
+        self.assertIn("simkl:53536", ev["ids"])
+
+    def test_sparse_tv_record_does_not_crash(self):
+        from simklCalendarExporter import normalize_v2_entry
+        cal = {"simkl_id": 999, "date": "2026-07-20T00:00:00Z", "finale_type": None,
+               "episode": {"season": 1, "episode": 1, "title": None, "url": ""}}
+        meta = {"title": "New Show", "url": "/tv/999/x", "poster": None,
+                "ids": {"simkl_id": 999, "slug": "x"}}
+        ev = normalize_v2_entry(cal, meta, "shows")
+        self.assertEqual(ev["title"], "New Show")
+
+
 if __name__ == "__main__":
     unittest.main()

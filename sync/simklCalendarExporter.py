@@ -92,6 +92,39 @@ def extract_all_ids(obj):
     return ids
 
 
+def normalize_v2_entry(cal_entry, meta, category):
+    if not isinstance(cal_entry, dict) or not isinstance(meta, dict):
+        return None
+    title = meta.get("title") or ""
+    # ids: metadata ids use simkl_id key; normalize to simkl:xxx + rest via extract_all_ids
+    ids = extract_all_ids(meta)
+    simkl_id = cal_entry.get("simkl_id") or meta.get("ids", {}).get("simkl_id") if isinstance(meta.get("ids"), dict) else cal_entry.get("simkl_id")
+    if simkl_id is not None:
+        ids.add(f"simkl:{simkl_id}")
+    # also index alt_titles for matching (v2 only, additive)
+    ep_obj = cal_entry.get("episode") if isinstance(cal_entry.get("episode"), dict) else {}
+    if category == "movies":
+        season = None
+        episode = None
+    elif category == "anime":
+        season = 1
+        episode = safe_int(ep_obj.get("episode"), 1)
+    else:
+        season = safe_int(ep_obj.get("season"), 1)
+        raw = ep_obj.get("episode")
+        episode = safe_int(raw, 1) if isinstance(raw, (int, str)) else safe_int(ep_obj.get("episode"), 1)
+    return {
+        "title": title or "Title",
+        "season": season,
+        "episode": episode,
+        "ep_title": ep_obj.get("title") or "",
+        "date": cal_entry.get("date"),
+        "type": category,
+        "ids": ids,
+        "_alt_titles": [a.get("name") for a in (meta.get("alt_titles") or []) if isinstance(a, dict) and a.get("name")],
+    }
+
+
 CATEGORY_KEY = {"shows": "show", "anime": "anime", "movies": "movie"}
 ALLOWED_STATUSES = {
     "shows": {"watching", "plantowatch", "plan_to_watch", "plan to watch", "hold", "completed"},
