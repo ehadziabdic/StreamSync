@@ -34,5 +34,35 @@ class TestShapeDispatch(unittest.TestCase):
         self.assertEqual(detect_feed_shape(V2_FILE_SAMPLE), "v2")
 
 
+class TestCalendarUrl(unittest.TestCase):
+    def test_builds_v2_url_with_required_params(self):
+        import os
+        os.environ["SIMKL_CLIENT_ID"] = "TESTID"
+        from simklCalendarExporter import build_calendar_url
+        url = build_calendar_url("/calendar/v2/tv.json")
+        self.assertIn("https://data.simkl.in/calendar/v2/tv.json?", url)
+        self.assertIn("client_id=TESTID", url)
+        self.assertIn("app-name=", url)
+        self.assertIn("app-version=", url)
+
+    def test_fetch_sends_user_agent(self):
+        from simklCalendarExporter import fetch_json
+        import urllib.request
+        seen = {}
+        real = urllib.request.Request
+        class Spy(real):
+            def __init__(self, url, headers=None, **kw):
+                seen.update(headers or {})
+                super().__init__(url, headers=headers, **kw)
+        urllib.request.Request = Spy
+        try:
+            fetch_json("https://data.simkl.in/calendar/v2/tv.json?client_id=x&app-name=a&app-version=b")
+        except Exception:
+            pass
+        finally:
+            urllib.request.Request = real
+        self.assertIn("User-Agent", seen)
+
+
 if __name__ == "__main__":
     unittest.main()

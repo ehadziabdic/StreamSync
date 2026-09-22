@@ -3,6 +3,7 @@ import os
 import re
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 SIMKL_CLIENT_ID = os.environ.get("SIMKL_CLIENT_ID")
@@ -10,8 +11,17 @@ SIMKL_ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
 GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 
-APP_NAME = "simkl-calendar-exporter"
-APP_VERSION = "5.0"
+APP_NAME = os.environ.get("SIMKL_APP_NAME") or "simkl-calendar-exporter"
+APP_VERSION = os.environ.get("SIMKL_APP_VERSION") or "5.0"
+CALENDAR_BASE = "https://data.simkl.in"
+
+def build_calendar_url(path):
+    qs = urllib.parse.urlencode({
+        "client_id": SIMKL_CLIENT_ID or "",
+        "app-name": APP_NAME,
+        "app-version": APP_VERSION,
+    })
+    return f"{CALENDAR_BASE}{path}?{qs}"
 
 def detect_feed_shape(feed):
     if isinstance(feed, dict) and isinstance(feed.get("calendar"), list) and isinstance(feed.get("metadata"), dict):
@@ -33,7 +43,7 @@ def safe_int(val, default=1):
 def fetch_json(url, headers=None, timeout=30):
     if headers is None:
         headers = {}
-    headers["User-Agent"] = "SimklCalendarExporter/4.5"
+    headers["User-Agent"] = f"{APP_NAME}/{APP_VERSION}"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
