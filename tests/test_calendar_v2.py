@@ -138,5 +138,28 @@ class TestMovieFallback(unittest.TestCase):
         self.assertEqual(len(merged), 1)
 
 
+class TestCoveredMovieIds(unittest.TestCase):
+    def test_flattens_movie_id_sets_without_crash(self):
+        from simklCalendarExporter import covered_movie_ids
+        events = [
+            {"title": "Ghost in the Shell", "season": None, "episode": None,
+             "ep_title": "", "date": "2026-12-18T00:00:00Z", "type": "movies",
+             "ids": {"simkl:53536", "imdb:tt0113568"}},
+            {"title": "King of the Hill", "season": 15, "episode": 1,
+             "ep_title": "x", "date": "2026-07-20T04:00:00Z", "type": "shows",
+             "ids": {"simkl:3437"}},
+            {"title": "NoIds Movie", "season": None, "episode": None,
+             "ep_title": "", "date": "2026-12-18T00:00:00Z", "type": "movies"},
+        ]
+        ids = covered_movie_ids(events)
+        self.assertIn("simkl:53536", ids)
+        self.assertNotIn("simkl:3437", ids)
+
+    def test_empty_and_no_movies(self):
+        from simklCalendarExporter import covered_movie_ids
+        self.assertEqual(covered_movie_ids([]), set())
+        self.assertEqual(covered_movie_ids([{"type": "shows", "ids": {"simkl:1"}}]), set())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -671,6 +671,11 @@ def update_gist(ics_content):
         print(f"\n❌ Error updating Gist: {e}")
 
 
+def covered_movie_ids(calendar_events):
+    parts = [e.get("ids") or set() for e in calendar_events if e.get("type") == "movies"]
+    return set().union(*parts) if parts else set()
+
+
 def main():
     missing = [
         var for var, val in [
@@ -688,9 +693,8 @@ def main():
     user_ids, user_titles, direct_events, watchlist_movies, watchlist_meta = get_user_watchlist()
     calendar_events = get_calendar_events(user_ids, user_titles)
     # movies already covered by feed? only look up the uncovered remainder
-    covered = {e.get("ids", set()) for e in calendar_events if e.get("type") == "movies"}
     # flatten: set of simkl:xxx covered
-    covered_ids = set().union(*covered) if covered else set()
+    covered_ids = covered_movie_ids(calendar_events)
     uncovered = [m for m in watchlist_movies if f"simkl:{m['simkl_id']}" not in covered_ids]
     if uncovered:
         print(f"[*] {len(uncovered)}/{len(watchlist_movies)} movies not in feed — detail fallback.")
