@@ -128,5 +128,15 @@ class TestCalendarMatching(unittest.TestCase):
         self.assertTrue(match_normalized_event(ev, USER_IDS_SAMPLE, USER_TITLES_SAMPLE))
 
 
+class TestMovieFallback(unittest.TestCase):
+    def test_movie_feed_event_survives_merge(self):
+        from simklCalendarExporter import merge_duplicate_events
+        feed_ev = {"title": "Ghost in the Shell", "season": None, "episode": None,
+                   "ep_title": "", "date": "2026-12-18T00:00:00Z", "type": "movies",
+                   "ids": {"simkl:53536"}}
+        merged = merge_duplicate_events([feed_ev])
+        self.assertEqual(len(merged), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

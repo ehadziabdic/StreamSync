@@ -687,9 +687,16 @@ def main():
 
     user_ids, user_titles, direct_events, watchlist_movies, watchlist_meta = get_user_watchlist()
     calendar_events = get_calendar_events(user_ids, user_titles)
-    movie_events = get_movie_events(watchlist_movies)
-
-    all_events = direct_events + calendar_events + movie_events
+    # movies already covered by feed? only look up the uncovered remainder
+    covered = {e.get("ids", set()) for e in calendar_events if e.get("type") == "movies"}
+    # flatten: set of simkl:xxx covered
+    covered_ids = set().union(*covered) if covered else set()
+    uncovered = [m for m in watchlist_movies if f"simkl:{m['simkl_id']}" not in covered_ids]
+    if uncovered:
+        print(f"[*] {len(uncovered)}/{len(watchlist_movies)} movies not in feed — detail fallback.")
+    movie_events = [e for e in calendar_events if e.get("type") == "movies"] + get_movie_events(uncovered)
+    tv_events = [e for e in calendar_events if e.get("type") != "movies"]
+    all_events = direct_events + tv_events + movie_events
     print(f"\n[*] {len(all_events)} raw event candidates before merge.")
 
     merged_events = merge_duplicate_events(all_events)
