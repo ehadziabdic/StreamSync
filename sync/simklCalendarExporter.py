@@ -10,6 +10,16 @@ SIMKL_ACCESS_TOKEN = os.environ.get("SIMKL_ACCESS_TOKEN")
 GIST_ID = os.environ.get("GIST_ID")
 GH_TOKEN = os.environ.get("GH_PAT_TOKEN") or os.environ.get("GIST_TOKEN")
 
+APP_NAME = "simkl-calendar-exporter"
+APP_VERSION = "5.0"
+
+def detect_feed_shape(feed):
+    if isinstance(feed, dict) and isinstance(feed.get("calendar"), list) and isinstance(feed.get("metadata"), dict):
+        return "v2"
+    if isinstance(feed, list):
+        return "v1"
+    return "unknown"
+
 
 def safe_int(val, default=1):
     if isinstance(val, dict):
