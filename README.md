@@ -66,8 +66,9 @@ Fetches your Simkl watchlist and generates an `.ics` calendar with upcoming epis
 
 ### Files
 
-- `sync/simklCalendarExporter.py` — Main script (stdlib only, no dependencies)
+- `sync/simklCalendarExporter.py` — Main script (stdlib only, no dependencies, calendar v2)
 - `.github/workflows/calender_sync.yml` — Runs every Monday + manual dispatch
+- `tests/test_calendar_v2.py` — v1/v2 parser tests (`$env:PYTHONPATH='sync'; python -m unittest`)
 
 ---
 

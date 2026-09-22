@@ -19,6 +19,8 @@ jobs:
         env:
           SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
           SIMKL_ACCESS_TOKEN: ${{ secrets.SIMKL_ACCESS_TOKEN }}
+          SIMKL_APP_NAME: ${{ secrets.SIMKL_APP_NAME }}
+          SIMKL_APP_VERSION: ${{ secrets.SIMKL_APP_VERSION }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GH_PAT_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
         run: python simklCalendarExporter.py
