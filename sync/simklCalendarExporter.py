@@ -451,14 +451,28 @@ def get_movie_events(watchlist_movies):
 
 
 def parse_iso_date(date_str):
+    """Parse an ISO 8601 timestamp into a naive UTC datetime.
+
+    Timezone offsets are converted (not stripped): "21:00-04:00" becomes
+    01:00 UTC the next day. Naive inputs are assumed UTC, as before.
+    Returns None when nothing parses."""
     if not date_str:
         return None
-    clean_str = str(date_str).replace("Z", "").replace("T", " ")
-    # Strip timezone offset (+HH:MM or -HH:MM)
-    clean_str = re.sub(r'[+-]\d{2}:\d{2}$', '', clean_str)
+    text = str(date_str).strip()
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        pass
+    clean_str = text.replace("Z", "").replace("T", " ")
+    # Strip timezone offset (+HH:MM or -HH:MM) — legacy fallback only;
+    # fromisoformat above already handled well-formed offsets.
+    clean_str = re.sub(r'[+-]\d{2}:?\d{2}$', '', clean_str)
     # Strip milliseconds
     clean_str = clean_str.split(".")[0]
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d %H%M%S"):
         try:
             return datetime.strptime(clean_str, fmt)
         except ValueError:
@@ -578,7 +592,7 @@ def diagnose_missing(watchlist_meta, merged_events):
             print(f"    [-] {title}")
 
 
-def generate_ics(events):
+def generate_ics(events, cancelled=None, previous_ics=""):
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -590,6 +604,7 @@ def generate_ics(events):
     ]
 
     seen_keys = set()
+    written_uids = set()
     now_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
 
     for ev in events:
@@ -626,6 +641,8 @@ def generate_ics(events):
 
         description = ev["ep_title"] if ev.get("ep_title") else f"Release: {ev['title']}"
         uid_str = re.sub(r"[^a-zA-Z0-9:_-]", "", dedup_key)
+        full_uid = f"{uid_str}@simkl"
+        written_uids.add(full_uid)
 
         dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         str_start = dt_start.strftime("%Y%m%dT%H%M%SZ")
@@ -634,18 +651,43 @@ def generate_ics(events):
         lines.extend(
             [
                 "BEGIN:VEVENT",
-                f"UID:{uid_str}@simkl",
+                f"UID:{full_uid}",
                 f"DTSTAMP:{dtstamp}",
                 f"DTSTART:{str_start}",
                 f"DTEND:{str_end}",
                 f"SUMMARY:{summary}",
                 f"DESCRIPTION:{description}",
+                "SEQUENCE:0",
                 "END:VEVENT",
             ]
         )
 
+    all_cancelled = list(cancelled or [])
+    if previous_ics:
+        all_cancelled.extend(build_cancellations(previous_ics, written_uids))
+
+    for c in all_cancelled:
+        dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        block = [
+            "BEGIN:VEVENT",
+            f"UID:{c['uid']}",
+            f"DTSTAMP:{dtstamp}",
+            f"DTSTART:{c['dtstart']}",
+        ]
+        if c.get("dtend"):
+            block.append(f"DTEND:{c['dtend']}")
+        block.extend(
+            [
+                f"SUMMARY:{c.get('summary') or 'Cancelled event'}",
+                "STATUS:CANCELLED",
+                "SEQUENCE:1",
+                "END:VEVENT",
+            ]
+        )
+        lines.extend(block)
+
     lines.append("END:VCALENDAR")
-    return "\n".join(lines), len(seen_keys)
+    return "\n".join(lines), len(seen_keys), len(all_cancelled)
 
 
 def update_gist(ics_content):
@@ -674,6 +716,108 @@ def update_gist(ics_content):
 def covered_movie_ids(calendar_events):
     parts = [e.get("ids") or set() for e in calendar_events if e.get("type") == "movies"]
     return set().union(*parts) if parts else set()
+
+
+# How far back Monday's run keeps emitting cancellations for aired events.
+# Covers a full season plus slack; older entries are assumed long-cleaned.
+CANCEL_RETENTION_DAYS = 180
+
+
+def parse_ics_events(ics_text):
+    """Extract VEVENT blocks from an ICS string into dicts.
+
+    Unfolds RFC 5545 folded lines (continuation lines starting with a
+    space/tab) and skips blocks without a UID. Never raises on bad input."""
+    events = []
+    try:
+        text = ics_text or ""
+    except Exception:
+        return events
+    # Unfold: a line starting with space/tab continues the previous line.
+    unfolded = []
+    try:
+        for raw in text.splitlines():
+            if raw[:1] in (" ", "\t") and unfolded:
+                unfolded[-1] += raw[1:]
+            else:
+                unfolded.append(raw)
+    except Exception:
+        return events
+    cur = None
+    for line in unfolded:
+        line = line.strip()
+        if line == "BEGIN:VEVENT":
+            cur = {}
+        elif line == "END:VEVENT":
+            if cur and cur.get("UID"):
+                events.append(cur)
+            cur = None
+        elif cur is not None and ":" in line:
+            key, _, value = line.partition(":")
+            key = key.split(";")[0].strip()
+            if key in ("UID", "DTSTART", "DTEND", "SUMMARY", "DESCRIPTION", "STATUS", "SEQUENCE"):
+                cur[key] = value.strip()
+    return events
+
+
+def fetch_previous_ics():
+    """Return last week's trakt.ics content from the Gist, or "" on any failure.
+
+    Never raises and never blocks the run: a missing/empty result simply
+    means no cancellations are emitted this week."""
+    if not GIST_ID or not GH_TOKEN:
+        return ""
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {
+        "Authorization": f"Bearer {GH_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        data = fetch_json(url, headers=headers)
+        if not isinstance(data, dict):
+            return ""
+        content = data.get("files", {}).get("trakt.ics", {}).get("content")
+        return content if isinstance(content, str) else ""
+    except Exception:
+        return ""
+
+
+def build_cancellations(previous_ics, written_uids, now=None):
+    """Diff last week's ICS against this week's UIDs.
+
+    Returns [{uid, dtstart, dtend, summary}] for: old entries that already
+    aired and are gone from the new file, plus old cancellations still
+    inside the retention window (carried forward). Anything older than
+    CANCEL_RETENTION_DAYS is pruned. Never raises."""
+    out = []
+    try:
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        retain_since = now - timedelta(days=CANCEL_RETENTION_DAYS)
+        for ev in parse_ics_events(previous_ics):
+            uid = ev.get("UID")
+            dt = parse_iso_date(ev.get("DTSTART"))
+            if not uid or not dt:
+                continue
+            if dt < retain_since:
+                continue  # pruned: assumed long-cleaned
+            if str(ev.get("STATUS", "")).upper() == "CANCELLED":
+                out.append({
+                    "uid": uid,
+                    "dtstart": ev.get("DTSTART"),
+                    "dtend": ev.get("DTEND"),
+                    "summary": ev.get("SUMMARY") or "Cancelled event",
+                })
+            elif uid not in (written_uids or set()) and dt < now:
+                out.append({
+                    "uid": uid,
+                    "dtstart": ev.get("DTSTART"),
+                    "dtend": ev.get("DTEND"),
+                    "summary": ev.get("SUMMARY") or "Cancelled event",
+                })
+    except Exception:
+        return []
+    return out
 
 
 def main():
@@ -706,9 +850,15 @@ def main():
     merged_events = merge_duplicate_events(all_events)
     print(f"[*] {len(merged_events)} after merging cross-feed duplicates.")
 
-    ics_content, event_count = generate_ics(merged_events)
+    previous_ics = fetch_previous_ics()
+    if previous_ics:
+        print("[*] Previous calendar fetched — computing cancellations for aired events.")
+    ics_content, event_count, cancelled_count = generate_ics(
+        merged_events, previous_ics=previous_ics
+    )
 
-    print(f"\n[+] Generated calendar with {event_count} active upcoming events.")
+    print(f"\n[+] Generated calendar with {event_count} active upcoming events "
+          f"({cancelled_count} cancellations).")
     update_gist(ics_content)
 
     diagnose_missing(watchlist_meta, merged_events)
